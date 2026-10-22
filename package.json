@@ -17,7 +17,6 @@
     "lib/cloudflare.js",
     "lib/cloudflared.js",
     "lib/skill.js",
-    "lib/unlock.js",
     "lib/qr.js",
     "lib/client.js",
     "lib/assets/heartbeat.js",
@@ -29,7 +28,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "check": "node test/qr.test.mjs && node test/trusted-hosts.test.mjs && node test/unlock.test.mjs && node test/cloudflare.test.mjs && node test/cloudflared.test.mjs && node test/client-load.test.mjs"
+    "check": "node test/qr.test.mjs && node test/trusted-hosts.test.mjs && node test/cloudflare.test.mjs && node test/cloudflared.test.mjs && node test/client-load.test.mjs"
   },
   "license": "MIT",
   "keywords": [
