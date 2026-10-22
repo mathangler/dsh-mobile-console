@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "手机访问",
-    "description": "用手机访问这台 Harness：入口地址与二维码、平台信任栅栏需要接受的隧道域名、cloudflared 子进程、最近连接过的设备，以及一键撤销全部已配对浏览器会话。"
+    "description": "用手机访问这台 Harness：带二维码的入口链接、Cloudflare 隧道自动配置（API Token 或引导浏览器登录）、只读设备列表，以及一键撤销全部已配对浏览器会话。"
   }
 }

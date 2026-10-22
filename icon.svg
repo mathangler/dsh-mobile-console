@@ -1,15 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Mobile console">
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="3" y="3" width="30" height="30" rx="8" fill="url(#a)" />
+  <rect x="8.6" y="8.4" width="11.4" height="19.2" rx="2.6" stroke="#FFFFFF" stroke-width="1.6" />
+  <path d="M12.9 24.6H15.7" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round" />
+  <path d="M12.4 15.2L14.7 17.5L12.4 19.8" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M17.1 19.8H18.7" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round" />
+  <path d="M23.6 21.4C24.5 22.3 25 23.4 25 24.7C25 26 24.5 27.1 23.6 28" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round" />
+  <path d="M26.4 18.6C28 20.1 28.9 22.3 28.9 24.7C28.9 27.1 28 29.3 26.4 30.8" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round" />
   <defs>
-    <linearGradient id="mc-screen" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2f6df6"/>
-      <stop offset="1" stop-color="#1b3fae"/>
+    <linearGradient id="a" x1="18" y1="3" x2="18" y2="33" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7AC2FF" />
+      <stop offset="1" stop-color="#4A65E8" />
     </linearGradient>
   </defs>
-  <rect x="18" y="4" width="28" height="56" rx="8" fill="url(#mc-screen)"/>
-  <rect x="21.5" y="10" width="21" height="41" rx="4.5" fill="#0d1730"/>
-  <rect x="27" y="54" width="10" height="2.4" rx="1.2" fill="#0d1730" opacity="0.55"/>
-  <path d="M26 22.5 L32.5 28.5 L26 34.5" fill="none" stroke="#8fd0ff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="35" y="32.4" width="6.5" height="2.4" rx="1.2" fill="#8fd0ff"/>
-  <path d="M46 16 A20 20 0 0 1 46 48" fill="none" stroke="#7ea8ff" stroke-width="2.6" stroke-linecap="round" opacity="0.85"/>
-  <path d="M52.5 10 A29 29 0 0 1 52.5 54" fill="none" stroke="#7ea8ff" stroke-width="2.2" stroke-linecap="round" opacity="0.45"/>
 </svg>
