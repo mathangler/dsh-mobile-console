@@ -25,7 +25,7 @@ import {
   tempTokenExpiry,
   tempTokenMatches,
 } from '../lib/accesskey.js';
-import { expiryFromDays } from '../lib/unlock.js';
+import { UNLOCK_COOKIE, expiryFromDays, signTicket, unlockPageHtml } from '../lib/unlock.js';
 import {
   ACCESS_KEYS_RECORD_KEY,
   DEVICES_V2_RECORD_KEY,
@@ -873,6 +873,157 @@ test('mints a one-time link for an existing device without touching it', async (
   const throttled = await endpoint(ctx, 'device-link', { id: source.id });
   assert.equal(throttled.ok, false);
   assert.match(throttled.error.message, /too many links/);
+});
+
+test('refuses a one-time link whose row was revoked, and one that expired', async () => {
+  const root = (ctx) => ctx.routes.exact.get('/');
+  const visit = async (ctx, token) => {
+    const res = fakeResponse();
+    await root(ctx)(fakeRequest(undefined, { method: 'GET', url: `/?token=${token}`, headers: { host: 'dsh.example.com' }, remoteAddress: '203.0.113.9' }), res);
+    return res;
+  };
+
+  // A live link redirects into the app...
+  const live = hostCtx();
+  const created = await endpoint(live, 'key-create', { name: 'Phone' });
+  const minted = await endpoint(live, 'token', { key: created.value.key });
+  const token = new URL(minted.value.url).searchParams.get('token');
+  assert.equal((await visit(live, token)).statusCode, 303, 'a live link works');
+
+  // ...revoking its row stops it dead, with nothing left to burn.
+  const revoked = hostCtx();
+  const key = await endpoint(revoked, 'key-create', { name: 'Phone' });
+  const link = await endpoint(revoked, 'token', { key: key.value.key });
+  const linkToken = new URL(link.value.url).searchParams.get('token');
+  const row = revoked.records.get(DEVICES_V2_RECORD_KEY).payload.devices[0];
+  assert.equal((await endpoint(revoked, 'device-revoke', { id: row.id })).value.revoked, true);
+  assert.equal(revoked.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 0);
+  assert.notEqual((await visit(revoked, linkToken)).statusCode, 303, 'a revoked link cannot be redeemed');
+
+  // An expired row is refused too (and burned, so it cannot linger).
+  const stale = hostCtx();
+  const staleKey = await endpoint(stale, 'key-create', { name: 'Phone' });
+  const staleLink = await endpoint(stale, 'token', { key: staleKey.value.key });
+  const staleToken = new URL(staleLink.value.url).searchParams.get('token');
+  stale.records.get(DEVICES_V2_RECORD_KEY).payload.devices[0].expiresAt = Date.now() - 1000;
+  assert.notEqual((await visit(stale, staleToken)).statusCode, 303, 'an expired link cannot be redeemed');
+  assert.equal(stale.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 0, 'and the attempt burns it');
+
+  // Pasting the token into the device cookie must not turn a single-use link
+  // into a fifteen-minute session: the link is only ever redeemed through the
+  // one door that burns it.
+  const smuggled = hostCtx();
+  const smuggledKey = await endpoint(smuggled, 'key-create', { name: 'Phone' });
+  const smuggledLink = await endpoint(smuggled, 'token', { key: smuggledKey.value.key });
+  const smuggledToken = new URL(smuggledLink.value.url).searchParams.get('token');
+  const gate = fakeResponse();
+  await smuggled.routes.exact.get('/')(
+    fakeRequest(undefined, {
+      method: 'GET',
+      url: '/',
+      headers: { host: 'dsh.example.com', cookie: `mc-device=${smuggledToken}` },
+      remoteAddress: '203.0.113.9',
+    }),
+    gate,
+  );
+  assert.notEqual(gate.statusCode, 303, 'the device cookie door refuses a one-time token');
+  assert.equal(smuggled.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 1, 'and the link is still intact for its own door');
+  assert.equal((await visit(smuggled, smuggledToken)).statusCode, 303, 'while its real door still works once');
+});
+
+test('backs the unlock ticket with its row, so revoking the row revokes it', async () => {
+  const ctx = hostCtx();
+  const secret = 'ticket-secret';
+  ctx.records.set('dsh-remote-access/recovery', {
+    kind: 'grant',
+    payload: { version: 1, key: 'k', salt: 's', secret, iterations: 1000 },
+  });
+  const now = Date.now();
+  const row = {
+    id: 'row-1',
+    name: 'Phone',
+    source: 'password',
+    temporary: true,
+    createdAt: new Date(now).toISOString(),
+    lastUsedAt: null,
+    expiresAt: now + 15 * 60 * 1000,
+    days: null,
+    hash: 'b'.repeat(64),
+  };
+  ctx.records.set(DEVICES_V2_RECORD_KEY, { kind: 'grant', payload: { version: 2, devices: [row] } });
+
+  const cookie = (payload) => ({ cookie: `${UNLOCK_COOKIE}=${signTicket(secret, payload)}` });
+  const ticket = { v: 1, exp: now + 15 * 60 * 1000, iat: now, row: row.id };
+  const entry = await route(ctx, `${CHANNEL}/unlock/entry`, {}, { method: 'POST', headers: cookie(ticket) });
+  assert.equal(entry.status, 200, 'a live row lets its ticket through');
+
+  // Revoke the row: the ticket it minted stops working, on the endpoint...
+  ctx.records.set(DEVICES_V2_RECORD_KEY, { kind: 'grant', payload: { version: 2, devices: [] } });
+  assert.equal((await route(ctx, `${CHANNEL}/unlock/entry`, {}, { method: 'POST', headers: cookie(ticket) })).status, 401);
+
+  // ...and on the root gate's redirect path, which is the one that matters.
+  const gate = fakeResponse();
+  await ctx.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: { host: 'dsh.example.com', ...cookie(ticket) }, remoteAddress: '203.0.113.9' }),
+    gate,
+  );
+  assert.notEqual(gate.statusCode, 303, 'a ticket whose row is gone cannot re-enter');
+
+  // A ticket with no row at all — anything minted before this rule — is refused
+  // rather than grandfathered in.
+  ctx.records.set(DEVICES_V2_RECORD_KEY, { kind: 'grant', payload: { version: 2, devices: [row] } });
+  const legacy = await route(ctx, `${CHANNEL}/unlock/entry`, {}, { method: 'POST', headers: cookie({ v: 1, exp: now + 60_000 }) });
+  assert.equal(legacy.status, 401, 'a row-less ticket buys nothing');
+});
+
+test('answers every QR-bearing door with the same matrix shape', async () => {
+  const ctx = hostCtx();
+  const matrix = (qr, where) => {
+    assert.ok(Number.isInteger(qr?.size) && typeof qr?.bits === 'string', `${where} carries { size, bits }`);
+    assert.equal(qr.bits.length, qr.size * qr.size, `${where} carries a full matrix`);
+  };
+
+  // The pairing-code door hands back a URL to navigate to, not just a day count.
+  const code = await endpoint(ctx, 'pair-code', { days: 30 });
+  matrix(code.value.qr, 'pair-code');
+  assert.equal(typeof code.value.url, 'string');
+
+  const pair = await route(ctx, `${CHANNEL}/unlock/pair`, { code: code.value.code }, { method: 'POST' });
+  assert.equal(pair.ok, true, JSON.stringify(pair.error));
+  assert.equal(typeof pair.value.url, 'string', 'the page has somewhere to go');
+  assert.equal(pair.value.days, 30);
+  assert.ok(pair.value.expiresAt > Date.now());
+  matrix(pair.value.qr, '/unlock/pair');
+
+  // The access-key and device-link doors.
+  const key = await endpoint(ctx, 'key-create', { name: 'Phone' });
+  matrix((await endpoint(ctx, 'token', { key: key.value.key })).value.qr, '/remote-access/token');
+  const devices = await endpoint(ctx, 'device-list', {});
+  matrix((await endpoint(ctx, 'device-link', { id: devices.value.devices[0].id })).value.qr, 'device-link');
+
+  // And /unlock/entry, which used to be the odd one out with an SVG string.
+  const secret = 'entry-secret';
+  ctx.records.set('dsh-remote-access/recovery', { kind: 'grant', payload: { version: 1, key: 'k', salt: 's', secret, iterations: 1000 } });
+  const row = ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices[0];
+  const ticket = signTicket(secret, { v: 1, exp: Date.now() + 60_000, row: row.id });
+  const entry = await route(ctx, `${CHANNEL}/unlock/entry`, {}, { method: 'POST', headers: { cookie: `${UNLOCK_COOKIE}=${ticket}` } });
+  assert.equal(entry.ok, true);
+  matrix(entry.value.qr, '/unlock/entry');
+});
+
+test('renders a page that can redeem a pairing code without a password', () => {
+  // The QR the panel prints encodes the code in this page's own query string,
+  // and the phone that opens it may have no password armed at all — so the
+  // script must run with no form, redeem the code, and go into the app.
+  const bare = unlockPageHtml({ prefix: CHANNEL, configured: false, title: 't', subtitle: 's', passwordLabel: 'p', buttonLabel: 'b', wrongLabel: 'w', missingLabel: 'no-password-yet', successLabel: 'ok', openLabel: 'o', qrLabel: 'qr' });
+  assert.ok(!bare.includes('<form id="f">'), 'still no form without a password');
+  assert.match(bare, /'\/unlock\/pair'/, 'the page can redeem a code');
+  assert.match(bare, /location\.search/, 'and it reads the code from its own query string');
+  assert.match(bare, /location\.replace\(/, 'then navigates into the app');
+  assert.match(bare, /'\/unlock\/entry'/, 'the password path keeps its entry fallback');
+  // The matrix → SVG conversion lives in the page, so one shape reaches both.
+  assert.match(bare, /function qrMarkup/, 'the page renders the matrix itself');
+  assert.match(bare, /shape-rendering="crispEdges"/);
 });
 
 test('reports the mode and switches the bind without starting a tunnel', async () => {

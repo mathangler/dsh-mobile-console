@@ -345,13 +345,33 @@ test('answers the page in the envelope its own script unwraps, in the page langu
   assert.equal(answered.value.iterations, 1000, 'the stored work factor rides along');
   assert.match(render('zh', 'configured'), /answer\.value/, 'and the page reads that envelope, not bare fields');
 
-  // An unlock ticket buys the entry link and its QR, labelled in the page language.
+  // An unlock ticket buys the entry link and its QR. The ticket names the
+  // authorized-device row it was minted for, so that row is the single source of
+  // truth: revoke it and the ticket stops working at once.
   settings.preference = 'en';
-  const ticket = signTicket('sec', { v: 1, exp: Date.now() + 60_000 });
+  const row = {
+    id: 'row-1',
+    name: 'Phone',
+    source: 'password',
+    temporary: true,
+    createdAt: new Date().toISOString(),
+    lastUsedAt: null,
+    expiresAt: Date.now() + 60_000,
+    days: null,
+    hash: 'a'.repeat(64),
+  };
+  ctx.records.set('dsh-remote-access/devices-v2', { kind: 'grant', payload: { version: 2, devices: [row] } });
+  const ticket = signTicket('sec', { v: 1, exp: Date.now() + 60_000, row: row.id });
   const entry = await request(ctx, `${CHANNEL}/unlock/entry`, { method: 'POST', headers: { cookie: `${UNLOCK_COOKIE}=${ticket}` } });
   assert.equal(entry.statusCode, 200);
   const fresh = JSON.parse(String(entry.body));
   assert.equal(fresh.ok, true);
   assert.equal(typeof fresh.value.url, 'string');
-  assert.ok(String(fresh.value.qr).includes('aria-label="QR code for the entry link"'));
+  // Every QR-bearing answer carries the same shape, the module matrix.
+  assert.ok(Number.isInteger(fresh.value.qr.size), 'the entry answer carries the matrix');
+  assert.ok(typeof fresh.value.qr.bits === 'string');
+  // The row disappears (the panel revoked it) and the ticket is worth nothing.
+  ctx.records.set('dsh-remote-access/devices-v2', { kind: 'grant', payload: { version: 2, devices: [] } });
+  const afterRevoke = await request(ctx, `${CHANNEL}/unlock/entry`, { method: 'POST', headers: { cookie: `${UNLOCK_COOKIE}=${ticket}` } });
+  assert.equal(afterRevoke.statusCode, 401, 'revoking the row revokes the ticket it minted');
 });
