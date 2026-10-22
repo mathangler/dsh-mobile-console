@@ -24,7 +24,7 @@ test('derives the cloudflared paths from the platform home', () => {
   // spellings rather than assuming POSIX.
   assert.equal(cloudflaredDir({ HOME: '/home/tester' }).replace(/\\/g, '/'), '/home/tester/.cloudflared');
   assert.equal(certPemPath(ENV), 'C:\\Users\\tester\\.cloudflared\\cert.pem');
-  assert.equal(tunnelConfigPath(ENV), 'C:\\Users\\tester\\.cloudflared\\dsh-mobile-console.yml');
+  assert.equal(tunnelConfigPath(ENV), 'C:\\Users\\tester\\.cloudflared\\dsh-remote-access.yml');
   assert.match(credentialsPath('6ff42ae2-765d-4adf-9cd0-1b1a1c2f2a3b', ENV), /6ff42ae2-765d-4adf-9cd0-1b1a1c2f2a3b\.json$/);
 });
 
@@ -63,7 +63,7 @@ test('renders a tunnel config with a forward-slashed credentials path', () => {
     service: 'http://127.0.0.1:3080',
     env: ENV,
   });
-  assert.match(text, /^# Written by dsh-mobile-console/);
+  assert.match(text, /^# Written by dsh-remote-access/);
   assert.match(text, /tunnel: 6ff42ae2-765d-4adf-9cd0-1b1a1c2f2a3b/);
   assert.match(text, /credentials-file: C:\/Users\/tester\/\.cloudflared\/6ff42ae2-765d-4adf-9cd0-1b1a1c2f2a3b\.json/);
   assert.match(text, /- hostname: dsh\.example\.com\n {4}service: http:\/\/127\.0\.0\.1:3080/);

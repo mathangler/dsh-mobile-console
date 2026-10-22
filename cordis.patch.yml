@@ -1,4 +1,4 @@
-# dsh-mobile-console — profile bundle patch.
+# dsh-remote-access — profile bundle patch.
 #
 # `dsh plugin --profile web add <this package>` runs pnpm in the profile
 # directory and appends every dependency that declares `dsh.bundle` to
@@ -23,7 +23,7 @@
 #   lanHost         concrete local interface literal for a LAN entry,
 #                   e.g. '10.0.161.47' (never a wildcard address)
 #   tunnelName      tunnel name the automatic setup creates or reuses
-#                   (default 'dsh-mobile-console'; use one name per machine)
+#                   (default 'dsh-remote-access'; use one name per machine)
 #   accessEmail     email the optional Cloudflare Access policy allows
 #   cloudflared     { command, args } for a tunnel you manage yourself, e.g.
 #                   { command: 'cloudflared', args: ['tunnel', 'run', 'dsh-mobile'] }
@@ -35,6 +35,10 @@
 # and the tunnel connector token in the Harness credential store under
 # CLOUDFLARE_API_TOKEN and CLOUDFLARE_TUNNEL_TOKEN.
 
+# The row id is `remote-access-panel`, NOT `remote-access`: the shipped `dsh-base`
+# bundle already owns `remote-access` for `@deepseek-ai/dsh-api-remote-access`,
+# and the Loader dedupes rows by id without a diagnostic, so reusing that id
+# would silently drop the shipped row.
 - insert:
-    - id: mobile-console
-      name: dsh-mobile-console
+    - id: remote-access-panel
+      name: dsh-remote-access

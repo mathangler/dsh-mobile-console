@@ -48,7 +48,7 @@ async function loadClient() {
 
 test('the client bundle registers under the package name with the expected inject list', async () => {
   const { definition } = await loadClient();
-  assert.equal(definition.id, 'dsh-mobile-console');
+  assert.equal(definition.id, 'dsh-remote-access');
   assert.equal(typeof definition.factory, 'function');
 
   const module = definition.factory((name) => {
@@ -79,7 +79,7 @@ test('the client half registers one settings section and two stylesheets', async
         localeRegistrations.push({ ns, id, keys: Object.keys(dict).length });
         return () => {};
       },
-      bind: () => (key) => (key === 'title' ? '手机访问' : key),
+      bind: () => (key) => (key === 'title' ? '远程访问' : key),
       subscribe: (fn) => {
         localeListener = fn;
         return () => {};
@@ -132,13 +132,13 @@ test('the client half registers one settings section and two stylesheets', async
   assert.deepEqual(injected, ['settings.section']);
   assert.equal(registered.length, 1);
   assert.equal(registered[0].options.name, 'settings.section');
-  assert.equal(registered[0].options.id, 'mobile-console');
+  assert.equal(registered[0].options.id, 'remote-access');
   assert.equal(typeof registered[0].component, 'function');
-  assert.equal(registered[0].options.label(), '手机访问', 'the nav label follows the active locale');
+  assert.equal(registered[0].options.label(), '远程访问', 'the nav label follows the active locale');
 
   assert.equal(localeRegistrations.length, 2, 'one dictionary per installed locale');
   assert.deepEqual(localeRegistrations.map((r) => r.id), ['en', 'zh']);
-  assert.ok(localeRegistrations.every((r) => r.ns === 'mobile-console' && r.keys > 20));
+  assert.ok(localeRegistrations.every((r) => r.ns === 'remote-access' && r.keys > 20));
   assert.equal(typeof localeListener, 'function', 'the panel re-renders on locale change');
 
   assert.equal(styles.length, 2, 'panel styles plus the narrow-viewport stylesheet');
@@ -147,9 +147,9 @@ test('the client half registers one settings section and two stylesheets', async
   assert.deepEqual(
     effects.filter((label) => typeof label === 'string'),
     [
-      'dsh-mobile-console: locale subscription',
-      'dsh-mobile-console: panel styles',
-      'dsh-mobile-console: narrow viewport tweaks',
+      'dsh-remote-access: locale subscription',
+      'dsh-remote-access: panel styles',
+      'dsh-remote-access: narrow viewport tweaks',
     ],
   );
 });
@@ -165,7 +165,7 @@ test('the panel renders through the translator before its first state arrives', 
     locale: {
       getSnapshot: () => ({ active: 'en', locales: [{ id: 'en' }] }),
       register: () => () => {},
-      bind: () => (key) => (key === 'title' ? 'Mobile Access' : key),
+      bind: () => (key) => (key === 'title' ? 'Remote Access' : key),
       subscribe: () => () => {},
     },
     effect: (fn) => fn(),

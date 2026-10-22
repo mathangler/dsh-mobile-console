@@ -115,7 +115,7 @@ test('finds the zone and explains a missing one', async () => {
 test('creates or reuses a tunnel, sets ingress, and publishes DNS', async () => {
   const routes = [
     { method: 'GET', match: (p) => p.startsWith('/accounts/a1/cfd_tunnel?'), result: [] },
-    { method: 'POST', path: '/accounts/a1/cfd_tunnel', result: { id: 't1', name: 'dsh-mobile-console' } },
+    { method: 'POST', path: '/accounts/a1/cfd_tunnel', result: { id: 't1', name: 'dsh-remote-access' } },
     { method: 'PUT', path: '/accounts/a1/cfd_tunnel/t1/configurations', result: {} },
     { method: 'GET', match: (p) => p.startsWith('/zones/z1/dns_records?'), result: [] },
     { method: 'POST', path: '/zones/z1/dns_records', result: { id: 'r1' } },
@@ -124,13 +124,13 @@ test('creates or reuses a tunnel, sets ingress, and publishes DNS', async () => 
   const fake = fakeFetch(routes);
   const client = createCloudflareClient({ fetchImpl: fake.impl });
 
-  const none = await client.findTunnel('tok', 'a1', 'dsh-mobile-console');
+  const none = await client.findTunnel('tok', 'a1', 'dsh-remote-access');
   assert.equal(none.result, undefined, 'an empty list means no tunnel yet');
 
-  const created = await client.createTunnel('tok', 'a1', 'dsh-mobile-console');
+  const created = await client.createTunnel('tok', 'a1', 'dsh-remote-access');
   assert.equal(created.result.id, 't1');
   assert.deepEqual(JSON.parse(fake.calls.find((c) => c.method === 'POST' && c.path === '/accounts/a1/cfd_tunnel').body), {
-    name: 'dsh-mobile-console',
+    name: 'dsh-remote-access',
     config_src: 'cloudflare',
   });
 
@@ -168,7 +168,7 @@ test('only deletes records this plugin owns', async () => {
       method: 'GET',
       match: (p) => p.startsWith('/zones/z1/dns_records?'),
       result: [
-        { id: 'mine', comment: 'dsh-mobile-console', content: 'x.cfargotunnel.com' },
+        { id: 'mine', comment: 'dsh-remote-access', content: 'x.cfargotunnel.com' },
         { id: 'foreign', comment: 'mail', content: '1.2.3.4' },
       ],
     },

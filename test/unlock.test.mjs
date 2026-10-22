@@ -20,7 +20,7 @@ import {
 } from '../lib/unlock.js';
 
 const PAGE = {
-  prefix: '/mobile-console',
+  prefix: '/remote-access',
   title: 't',
   subtitle: 's',
   passwordLabel: 'p',
@@ -112,7 +112,7 @@ test('renders a challenge-response page, and nothing to attack without a passwor
   assert.match(configured, /name: 'PBKDF2'/);
   assert.match(configured, /crypto\.subtle\.sign/);
   // The page builds its URLs as PREFIX + suffix, so assert both halves.
-  assert.match(configured, /PREFIX = "\/mobile-console"/);
+  assert.match(configured, /PREFIX = "\/remote-access"/);
   assert.match(configured, /'\/unlock\/challenge'/);
   assert.match(configured, /'\/unlock\/verify'/);
   assert.match(configured, /'\/unlock\/entry'/);

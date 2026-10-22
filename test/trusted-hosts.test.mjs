@@ -2,6 +2,7 @@
 // probe, and the device view's pure helpers.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   normalizeConfig,
   deviceLabel,
@@ -17,6 +18,11 @@ import {
   suggestedLabelFor,
   SECRET_REF_RE,
   SECRET_REFS,
+  apply,
+  CHANNEL,
+  HEARTBEAT_PATH,
+  DEVICE_RECORD_KEY,
+  ROW_ID,
 } from '../lib/index.js';
 import { skillRegistration, SKILL_NAME } from '../lib/skill.js';
 
@@ -229,13 +235,13 @@ test('suggests a hostname label from the machine platform', () => {
 test('every stored secret ref can be parsed back at startup', () => {
   // The credentials document is validated against this pattern when it loads, so
   // a name that does not match fails the *next startup*, not the call that wrote
-  // it. That is exactly how "dsh-mobile-console/unlock-secret" once bricked a
+  // it. That is exactly how "dsh-remote-access/unlock-secret" once bricked a
   // boot: the plugin called set() with a slash and the file became unloadable.
   for (const ref of SECRET_REFS) {
     assert.match(ref, SECRET_REF_RE, `${ref} must be a legal env-style credential ref`);
   }
   assert.ok(SECRET_REFS.length >= 2, 'the Cloudflare token and the connector token are both stored');
-  assert.ok(!SECRET_REF_RE.test('dsh-mobile-console/unlock-secret'), 'a slashed ref is rejected');
+  assert.ok(!SECRET_REF_RE.test('dsh-remote-access/unlock-secret'), 'a slashed ref is rejected');
   assert.ok(!SECRET_REF_RE.test('1LEADING_DIGIT'), 'a leading digit is rejected');
   assert.ok(!SECRET_REF_RE.test(''), 'an empty ref is rejected');
   assert.ok(SECRET_REF_RE.test('CLOUDFLARE_API_TOKEN'));
@@ -255,10 +261,10 @@ test('treats every browser spelling of absent as not set', () => {
 });
 
 test('registers the setup skill with all three platforms covered', () => {
-  const skill = skillRegistration('mobile-console');
+  const skill = skillRegistration('remote-access');
   assert.equal(skill.name, SKILL_NAME);
   assert.equal(skill.source, 'runtime');
-  assert.equal(skill.provider, 'mobile-console');
+  assert.equal(skill.provider, 'remote-access');
   assert.deepEqual(skill.invocation, { modelInvocable: true, userInvocable: true });
   assert.equal(skill.resourceBase.kind, 'opaque');
   assert.ok(skill.description.length > 40, 'the catalog needs a real description');
@@ -288,4 +294,95 @@ test('registers the setup skill with all three platforms covered', () => {
   assert.match(skill.content, /Add a site/);
   assert.match(skill.content, /100 MB/);
   assert.match(skill.content, /重启 dsh/);
+});
+
+test('routes and record keys live under the renamed plugin scope', () => {
+  assert.equal(CHANNEL, '/remote-access');
+  assert.equal(HEARTBEAT_PATH, '/remote-access/heartbeat.js');
+  assert.equal(DEVICE_RECORD_KEY, 'dsh-remote-access/devices');
+  assert.ok(!CHANNEL.includes('mobile-console'), 'no route embeds the old plugin name');
+});
+
+test('the package patch row keeps the collision-free row id', () => {
+  // `dsh-base` already owns `id: remote-access` for `@deepseek-ai/dsh-api-remote-access`,
+  // and the Loader dedupes rows by id with the last one winning and no diagnostic:
+  // reusing that id would silently drop the shipped row, so the id carries the
+  // `-panel` suffix and the code that rewrites its own row uses the same value.
+  assert.equal(ROW_ID, 'remote-access-panel');
+  const yaml = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8');
+  assert.match(yaml, /- id: remote-access-panel\n +name: dsh-remote-access/);
+  assert.ok(!/^\s*- id: remote-access\s*$/m.test(yaml), 'the shipped row id is never reused');
+});
+
+/** Minimal host ctx: enough for `apply` to register its routes and effects. */
+function hostCtx(credentials) {
+  const routes = [];
+  return {
+    routes,
+    effect: (fn) => fn(),
+    get: (name) => (name === 'credentials' ? credentials : undefined),
+    webServer: {
+      register: (route) => {
+        routes.push(route);
+        return () => {};
+      },
+      tapIndex: () => () => {},
+    },
+  };
+}
+
+/** A credentials store good enough for the record half of the seam. */
+function credentialStore(initial = []) {
+  const records = new Map(initial);
+  return {
+    records,
+    readRecord: async (key) => records.get(key),
+    modifyRecord: async (key, mutate) => {
+      const next = await mutate(records.get(key));
+      if (next !== undefined) records.set(key, next);
+      return next;
+    },
+  };
+}
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test('copies legacy credential records into the new scope, once, without deleting them', async () => {
+  const legacy = {
+    'dsh-mobile-console/devices': { kind: 'grant', payload: { version: 1, devices: [{ id: 'd1' }] } },
+    'dsh-mobile-console/recovery': { kind: 'grant', payload: { version: 1, salt: 's', key: 'k', secret: 'x' } },
+    'dsh-mobile-console/device-tokens': { kind: 'grant', payload: { version: 1, tokens: [{ hash: 'h' }] } },
+    'dsh-mobile-console/pair-codes': { kind: 'grant', payload: { version: 1, codes: [] } },
+  };
+  const credentials = credentialStore(Object.entries(legacy));
+  apply(hostCtx(credentials), undefined);
+  await tick();
+
+  for (const [oldKey, record] of Object.entries(legacy)) {
+    const newKey = oldKey.replace('dsh-mobile-console', 'dsh-remote-access');
+    assert.deepEqual(credentials.records.get(newKey), record, `${newKey} was copied`);
+    assert.deepEqual(credentials.records.get(oldKey), record, `${oldKey} is kept as the rollback path`);
+  }
+
+  // A newer record under the new key is never overwritten by a second run.
+  credentials.records.set('dsh-remote-access/recovery', { kind: 'grant', payload: { version: 1, salt: 'newer' } });
+  apply(hostCtx(credentials), undefined);
+  await tick();
+  assert.equal(credentials.records.get('dsh-remote-access/recovery').payload.salt, 'newer');
+  assert.ok(!credentials.records.has('dsh-remote-access/nothing'), 'no record is invented');
+});
+
+test('a broken credential store cannot stop activation', async () => {
+  const refusing = {
+    readRecord: async () => {
+      throw new Error('the store is locked');
+    },
+    modifyRecord: async () => {
+      throw new Error('the store is locked');
+    },
+  };
+  assert.doesNotThrow(() => apply(hostCtx(refusing), undefined));
+  await tick();
+  assert.doesNotThrow(() => apply(hostCtx(undefined), undefined));
+  await tick();
 });

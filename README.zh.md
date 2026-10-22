@@ -1,6 +1,6 @@
-# dsh-mobile-console
+# dsh-remote-access
 
-给 [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) 加上手机访问：用手机打开 Harness 的 Web UI，并在一页设置里管理这套访问。
+给 [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) 加上远程访问：用手机打开 Harness 的 Web UI，并在一页设置里管理这套访问。
 
 [English](README.md) | 中文
 
@@ -17,7 +17,7 @@ Harness 本身已经具备手机所需的一切：浏览器界面、每次启动
 | **局域网入口** | 本机所有非回环地址；一个按钮把监听绑定到其中之一 |
 | **cloudflared 子进程** | 检测可执行文件、以受管子进程方式启停命名隧道、显示最近输出 |
 | **Cloudflare 自动配置** | 环境检测（可执行文件、证书、已保存令牌、域名）、显示授权链接的引导登录、一键 API Token 配置、可选的 Access 创建，以及清理 |
-| **配置 skill** | 安装插件即安装 `dsh-mobile-access`，可在新对话里让它带着走完整套配置 |
+| **配置 skill** | 安装插件即安装 `dsh-remote-access`，可在新对话里让它带着走完整套配置 |
 | **会话续期** | 每次打开应用都会把手机 Cookie 重新签发为满有效期，另有「立即为本设备续期」按钮 |
 | **对外广播地址** | 一个按钮让平台广播隧道域名，另一个按钮改回 `127.0.0.1` |
 | **设备** | 只读列表：最近加载过界面的手机（名称、客户端、首次/最后在线、地址） |
@@ -46,10 +46,10 @@ Harness 本身已经具备手机所需的一切：浏览器界面、每次启动
 
 ```sh
 # 从 GitHub 安装（pnpm 解析默认分支）
-dsh plugin --profile web add github:mathangler/dsh-mobile-console
+dsh plugin --profile web add github:mathangler/dsh-remote-access
 
 # 或从本地检出安装——开发本插件时用的就是这种
-dsh plugin --profile web add /absolute/path/to/dsh-mobile-console
+dsh plugin --profile web add /absolute/path/to/dsh-remote-access
 ```
 
 `dsh plugin` 会把参数原样转发给 profile 目录里的 `pnpm`；凡是声明了 `dsh.bundle` 的依赖都会被追加进 `dsh.profile.bundles`。如果你的网络封了 git over HTTPS，就用本地检出那种写法。
@@ -57,15 +57,15 @@ dsh plugin --profile web add /absolute/path/to/dsh-mobile-console
 然后：
 
 1. **重启 Harness**——host 半（路由、受管的 cloudflared 子进程、配置 skill）在启动时加载。
-2. 打开 **设置 → 手机访问**。这个区块就是全部界面。
+2. 打开 **设置 → 远程访问**。这个区块就是全部界面。
 
-安装的同时会装上**配置 skill**，所以在新的对话里让它"配置手机访问"，它会带着你把整套配置走完。
+安装的同时会装上**配置 skill**，所以在新的对话里让它"配置远程访问"，它会带着你把整套配置走完。
 
 ## 更新
 
 ```sh
-dsh plugin --profile web add github:mathangler/dsh-mobile-console   # 重新解析分支
-dsh plugin --profile web update dsh-mobile-console                  # 或更新该依赖
+dsh plugin --profile web add github:mathangler/dsh-remote-access   # 重新解析分支
+dsh plugin --profile web update dsh-remote-access                  # 或更新该依赖
 ```
 
 然后重启 Harness。**面板写过的所有东西都会保留**，因为它们在你的 profile patch 层，而不在包里：域名、隧道名、`trustedHosts` 条目、对外广播地址、cloudflared 设置。设备列表与 Cloudflare 凭据在 Harness 凭据库里，同样保留。
@@ -73,7 +73,7 @@ dsh plugin --profile web update dsh-mobile-console                  # 或更新�
 ## 卸载
 
 ```sh
-dsh plugin --profile web remove dsh-mobile-console
+dsh plugin --profile web remove dsh-remote-access
 ```
 
 然后重启 Harness。包、它的行和设置区块都会消失；它托管的隧道也随之停止——那个子进程属于插件的 fiber。
@@ -82,10 +82,10 @@ dsh plugin --profile web remove dsh-mobile-console
 
 | 内容 | 位置 | 怎么清理 |
 |---|---|---|
-| 面板写入的行配置（域名、隧道名、广播地址） | 你的 profile `cordis.patch.yml` 里 `id: mobile-console` 那条 | 删掉该条 |
+| 面板写入的行配置（域名、隧道名、广播地址） | 你的 profile `cordis.patch.yml` 里 `id: remote-access-panel` 那条 | 删掉该条 |
 | 信任栅栏条目 | 同一文件的 `id: connection` → `trustedHosts` | 从列表里去掉该域名 |
 | Cloudflare 隧道、它的 DNS 记录、已保存的连接器令牌 | Cloudflare，以及 Harness 凭据库 | **卸载插件之前**先在面板「高级」里点 **清理** |
-| 写出的隧道配置 | `~/.cloudflared/dsh-mobile-console.yml` | 删掉该文件 |
+| 写出的隧道配置 | `~/.cloudflared/dsh-remote-access.yml` | 删掉该文件 |
 | 已保存的 Cloudflare API Token | Harness 凭据库（`CLOUDFLARE_API_TOKEN`） | 面板 → **清除已保存的 API Token** |
 
 ## 使用
@@ -96,7 +96,7 @@ dsh plugin --profile web remove dsh-mobile-console
 2. **建隧道**，两条路任选：
    - **检测环境 → 开始浏览器登录 → 创建隧道并完成配置**，或
    - 粘贴 Cloudflare API Token → **一键自动配置**。
-   两者都会创建隧道、发布 DNS 记录、写出 `~/.cloudflared/dsh-mobile-console.yml`，并把域名写进平台信任栅栏。浏览器登录**必须从面板发起**：在终端里起的登录进程活不长，会在写出 `cert.pem` 之前被结束，结果就是"授权了却像什么都没发生"。
+   两者都会创建隧道、发布 DNS 记录、写出 `~/.cloudflared/dsh-remote-access.yml`，并把域名写进平台信任栅栏。浏览器登录**必须从面板发起**：在终端里起的登录进程活不长，会在写出 `cert.pem` 之前被结束，结果就是"授权了却像什么都没发生"。
 3. **点 cloudflared 卡片的「启动」**。隧道作为 Harness 的子进程运行：你点它才启动，插件停用或重启后即停止。
 4. **用手机扫入口二维码**。这一次访问会把"本次进程的启动令牌"换成签名 Cookie。从二维码或别的 App 点开时，**第一次落地需要刷新一次**——平台的 Cookie 是 `SameSite=Strict`，跨站导航后的跳转不会带上它；把链接粘贴到地址栏则一次就能进。
 5. **可选：创建 Access 应用**（同一张卡片），让 Cloudflare 在任何流量到达这台机器之前先要一次邮箱验证码。
@@ -109,8 +109,8 @@ dsh plugin --profile web remove dsh-mobile-console
 
 ```yaml
 - insert:
-    - id: mobile-console
-      name: dsh-mobile-console
+    - id: remote-access-panel
+      name: dsh-remote-access
       config:
         tunnelHost: dsh.example.com
         publicUrl: https://dsh.example.com
@@ -136,7 +136,7 @@ dsh plugin --profile web remove dsh-mobile-console
 *Cloudflare 配置* 卡片会替你把隧道这部分做完。它先**检测环境**——cloudflared 是否安装（及版本）、`cert.pem` 是否存在、是否已保存 API Token 或连接器令牌、是否已配置域名——然后给出适合当前状态的路径：
 
 - **没有 cloudflared？** 卡片显示对应平台的安装命令（`winget install --id Cloudflare.cloudflared`、`brew install cloudflared`，或 releases 页面），装完点"检测环境"重新检测。
-- **浏览器授权。** 点"开始浏览器登录"会运行 `cloudflared tunnel login`，把它打印的 `dash.cloudflare.com/argotunnel` 网址抓到面板里显示（cloudflared 自动打开的那个标签同样可用），轮询直到 `cert.pem` 出现；再点"创建隧道并完成配置"，它会执行 `tunnel create`、`tunnel route dns`，写出 `~/.cloudflared/dsh-mobile-console.yml`，并把域名加入平台信任栅栏。
+- **浏览器授权。** 点"开始浏览器登录"会运行 `cloudflared tunnel login`，把它打印的 `dash.cloudflare.com/argotunnel` 网址抓到面板里显示（cloudflared 自动打开的那个标签同样可用），轮询直到 `cert.pem` 出现；再点"创建隧道并完成配置"，它会执行 `tunnel create`、`tunnel route dns`，写出 `~/.cloudflared/dsh-remote-access.yml`，并把域名加入平台信任栅栏。
 - **API Token。** 粘贴一个具备卡片所列权限的 Token，点"保存并验证"，再点"一键自动配置"：插件创建或复用一条远端托管隧道、把 ingress 指向本机监听、发布代理 CNAME、保存连接器令牌、信任该域名。不需要浏览器，也不需要 `cert.pem`。
 - **Access（可选）。** 填一个邮箱，点"创建 Access 应用"，得到一个自托管应用 + 只允许该邮箱的 One-time PIN 策略 + 1 个月会话。卡片同时会报告该 Zero Trust 组织是否配置了任何登录方式。
 - **清理。** 一个按钮删除本插件创建的 DNS 记录与隧道，并清除已保存的连接器令牌。
@@ -147,7 +147,7 @@ dsh plugin --profile web remove dsh-mobile-console
 
 ### 随插件安装的配置 skill
 
-装插件的同时会装一个名为 `dsh-mobile-access` 的**运行时 skill**（通过 `ctx.skills.register` 注册，禁用插件即移除，不会往你的 skills 目录写任何文件）。在新对话里说一句"配置手机访问"就会触发它，模型会带着走完整条路：唯一的人工步骤（注册商处改 NS）、环境检测、建隧道、写信任栅栏、可选的 Access 应用、以及手机首次配对。它的正文**分别覆盖 Windows / macOS / Linux**（安装命令、`%USERPROFILE%\.cloudflared` 与 `~/.cloudflared`、`$env:DSH_HOME` 与 `$DSH_HOME`、各自的常驻方式），末尾还有一张针对真实会遇到的故障表：信任栅栏 403、`no active Cloudflare zone`、插件旧代码、100 MB 上传上限。
+装插件的同时会装一个名为 `dsh-remote-access` 的**运行时 skill**（通过 `ctx.skills.register` 注册，禁用插件即移除，不会往你的 skills 目录写任何文件）。在新对话里说一句"配置远程访问"就会触发它，模型会带着走完整条路：唯一的人工步骤（注册商处改 NS）、环境检测、建隧道、写信任栅栏、可选的 Access 应用、以及手机首次配对。它的正文**分别覆盖 Windows / macOS / Linux**（安装命令、`%USERPROFILE%\.cloudflared` 与 `~/.cloudflared`、`$env:DSH_HOME` 与 `$DSH_HOME`、各自的常驻方式），末尾还有一张针对真实会遇到的故障表：信任栅栏 403、`no active Cloudflare zone`、插件旧代码、100 MB 上传上限。
 
 面板本身不再放教程：面板显示状态并执行操作，说明交给 skill。
 
@@ -215,7 +215,7 @@ dsh plugin --profile web remove dsh-mobile-console
 - **令牌是每次进程生成的。** `dsh web` 启动时会打印带令牌的 URL，本插件通过 `ctx.connection.authenticatedUrl()` 生成同样的 URL。重新打开一次新的入口链接即重新配对，也是手机续期过期 Cookie 的方式。
 - **Cookie 绑定 authority。** 同一台手机经隧道配对与经局域网配对持有不同的 Cookie；隧道域名一改，旧 Cookie 立即失效。
 - **Harness 内部的撤销是全有或全无。** "撤销全部已配对浏览器会话"删除 `client-connection/browser-session` 凭据记录；运行中的进程仍持有内存里的签名密钥，所以效果在下次启动时落地——面板会明确这么写。要按身份撤销，请撤销 Cloudflare Access 会话。
-- **心跳脚本是公开静态资源。** `/mobile-console/heartbeat.js` 与其它静态资源一样公开：它不含任何机密，且只在页面本身已通过鉴权时才会打点；它背后的心跳接口是受栅栏保护的。
+- **心跳脚本是公开静态资源。** `/remote-access/heartbeat.js` 与其它静态资源一样公开：它不含任何机密，且只在页面本身已通过鉴权时才会打点；它背后的心跳接口是受栅栏保护的。
 - **配置写入是显式的。** 所有写入都经 `ctx.configEditor`，落进你自己的 profile patch 层，并通过正常 Loader 路径就地重建。会"固化"继承值的写入（`webserver` 行的 `host`）会一并复述当前生效值，面板也标注了需要重启。
 
 ## 测试

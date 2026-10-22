@@ -1,4 +1,4 @@
-# dsh-mobile-console
+# dsh-remote-access
 
 Mobile access for [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh): reach the Harness Web UI from a phone, and manage that access from one settings page.
 
@@ -17,7 +17,7 @@ This plugin is that part, and nothing more:
 | **Local network entry** | The machine's non-loopback addresses, and one button that binds the listener to one of them |
 | **cloudflared child process** | Detect the binary, start/stop a named tunnel as a managed child, and show its recent output |
 | **Cloudflare setup** | An environment checklist (binary, certificate, stored tokens, hostname), a guided browser login that shows the authorization URL, a one-click API-token setup, optional Access creation, and teardown |
-| **Setup skill** | Installing the plugin installs `dsh-mobile-access`, so a new conversation can walk the whole configuration |
+| **Setup skill** | Installing the plugin installs `dsh-remote-access`, so a new conversation can walk the whole configuration |
 | **Session renewal** | Every app load re-mints the phone's cookie with a full lifetime, plus a manual *Renew this device now* button |
 | **Advertised URL** | One button that makes the platform advertise the tunnel hostname, and one that puts it back to `127.0.0.1` |
 | **Devices** | A read-only view of the phones that recently loaded the UI (name, client, first/last seen, address) |
@@ -46,10 +46,10 @@ The device list is a **view, not an authority**: the injected heartbeat records 
 
 ```sh
 # from GitHub (pnpm resolves the default branch)
-dsh plugin --profile web add github:mathangler/dsh-mobile-console
+dsh plugin --profile web add github:mathangler/dsh-remote-access
 
 # or from a checkout on disk — the form used while developing this plugin
-dsh plugin --profile web add /absolute/path/to/dsh-mobile-console
+dsh plugin --profile web add /absolute/path/to/dsh-remote-access
 ```
 
 `dsh plugin` forwards its arguments to `pnpm` inside the profile directory, and every dependency that declares `dsh.bundle` is appended to `dsh.profile.bundles`. If your network blocks git over HTTPS, use the checkout form.
@@ -57,15 +57,15 @@ dsh plugin --profile web add /absolute/path/to/dsh-mobile-console
 Then:
 
 1. **Restart the Harness.** The host half — routes, the managed tunnel child, the setup skill — is loaded at startup.
-2. Open **Settings → Mobile Access**. That section is the whole interface.
+2. Open **Settings → Remote Access**. That section is the whole interface.
 
 Installing also installs the setup skill, so a new conversation can walk the whole configuration for you: ask it to *configure phone access*.
 
 ## Update
 
 ```sh
-dsh plugin --profile web add github:mathangler/dsh-mobile-console   # re-resolve the branch
-dsh plugin --profile web update dsh-mobile-console                  # or update the dependency
+dsh plugin --profile web add github:mathangler/dsh-remote-access   # re-resolve the branch
+dsh plugin --profile web update dsh-remote-access                  # or update the dependency
 ```
 
 Then restart the Harness. Everything the panel wrote survives an update, because it lives in **your** profile patch layer rather than in the package: the hostname, the tunnel name, the `trustedHosts` entry, the advertised URL and the cloudflared settings. The device list and the Cloudflare credentials live in the Harness credential store and survive as well.
@@ -73,7 +73,7 @@ Then restart the Harness. Everything the panel wrote survives an update, because
 ## Uninstall
 
 ```sh
-dsh plugin --profile web remove dsh-mobile-console
+dsh plugin --profile web remove dsh-remote-access
 ```
 
 Then restart the Harness. The package, its row and its settings section are gone, and the tunnel it was running dies with it — the child process belongs to the plugin's fiber.
@@ -82,10 +82,10 @@ Deliberately left behind, because they are yours:
 
 | What | Where | How to clean it |
 |---|---|---|
-| Row config the panel wrote (hostname, tunnel name, advertised URL) | your profile's `cordis.patch.yml`, the `id: mobile-console` entry | delete that entry |
+| Row config the panel wrote (hostname, tunnel name, advertised URL) | your profile's `cordis.patch.yml`, the `id: remote-access-panel` entry | delete that entry |
 | The trust entry | same file, `id: connection` → `trustedHosts` | drop the hostname from the list |
 | The Cloudflare tunnel, its DNS record and the stored connector token | Cloudflare, plus the Harness credential store | press **Teardown** in the panel's Advanced card *before* removing the plugin |
-| The written tunnel config | `~/.cloudflared/dsh-mobile-console.yml` | delete the file |
+| The written tunnel config | `~/.cloudflared/dsh-remote-access.yml` | delete the file |
 | A stored Cloudflare API token | the Harness credential store (`CLOUDFLARE_API_TOKEN`) | panel → **Forget the stored API token** |
 
 ## Usage
@@ -96,7 +96,7 @@ The panel is a control surface, not a wizard. Five things, in the order you need
 2. **Create the tunnel**, either way:
    - **Check the environment → Start the browser login → Create the tunnel and configure**, or
    - paste a Cloudflare API token → **Set up automatically**.
-   Both create the tunnel, publish the DNS record, write `~/.cloudflared/dsh-mobile-console.yml` and put the hostname into the platform's trust fence. Start the browser login **from the panel**: a login process started in a terminal is short-lived, gets killed before it can write `cert.pem`, and the authorization then looks like it did nothing.
+   Both create the tunnel, publish the DNS record, write `~/.cloudflared/dsh-remote-access.yml` and put the hostname into the platform's trust fence. Start the browser login **from the panel**: a login process started in a terminal is short-lived, gets killed before it can write `cert.pem`, and the authorization then looks like it did nothing.
 3. **Press Start** on the cloudflared card. The tunnel runs as a child of the Harness: it starts when you start it, and it stops with the plugin or a restart.
 4. **Scan the entry QR code with the phone.** That single visit exchanges the process launch token for a signed cookie. The first arrival from a QR code or another app needs one refresh — the platform's cookie is `SameSite=Strict`, so it is not sent on the redirect that follows a cross-site navigation. Pasting the link into the address bar works first time.
 5. **Optionally create the Access application** (same card) so Cloudflare asks for an e-mail one-time PIN before any traffic reaches this machine.
@@ -109,8 +109,8 @@ Everything lives in the plugin row's `config`, and the panel writes it into your
 
 ```yaml
 - insert:
-    - id: mobile-console
-      name: dsh-mobile-console
+    - id: remote-access-panel
+      name: dsh-remote-access
       config:
         tunnelHost: dsh.example.com
         publicUrl: https://dsh.example.com
@@ -136,7 +136,7 @@ Everything lives in the plugin row's `config`, and the panel writes it into your
 The *Cloudflare setup* card does the tunnel work for you. It first **checks the environment** — whether `cloudflared` is installed (and its version), whether `cert.pem` exists, whether an API token or connector token is stored, whether a hostname is configured — and then offers whichever path fits:
 
 - **No cloudflared?** The card shows the install command for your platform (`winget install --id Cloudflare.cloudflared`, `brew install cloudflared`, or the release page) and a *Check the environment* button to re-test after installing.
-- **Browser authorization.** *Start the browser login* runs `cloudflared tunnel login`, captures the `dash.cloudflare.com/argotunnel` URL it prints and shows it in the panel (the tab cloudflared opens works too), polls until `cert.pem` appears, then *Create the tunnel and configure* runs `tunnel create`, `tunnel route dns`, writes `~/.cloudflared/dsh-mobile-console.yml`, and adds the hostname to the platform trust fence.
+- **Browser authorization.** *Start the browser login* runs `cloudflared tunnel login`, captures the `dash.cloudflare.com/argotunnel` URL it prints and shows it in the panel (the tab cloudflared opens works too), polls until `cert.pem` appears, then *Create the tunnel and configure* runs `tunnel create`, `tunnel route dns`, writes `~/.cloudflared/dsh-remote-access.yml`, and adds the hostname to the platform trust fence.
 - **API token.** Paste a token with the permissions the card lists, press *Save and verify*, then *Set up automatically*: the plugin creates or reuses a remotely-managed tunnel, points its ingress at the local listener, publishes the proxied CNAME, stores the connector token, and trusts the hostname. No browser, no `cert.pem`.
 - **Access (optional).** Give an email and press *Create the Access application* for a self-hosted application with a one-time-PIN policy and a one-month session. The card also reports whether the Zero Trust organization has any login method at all.
 - **Teardown.** One button deletes the DNS record and tunnel this plugin created and forgets the stored connector token.
@@ -147,7 +147,7 @@ The one step no API can do is the nameserver change at your registrar — includ
 
 ### The setup skill
 
-Installing the plugin also installs a **runtime skill** named `dsh-mobile-access` (registered through `ctx.skills.register`, so disabling the plugin removes it and nothing is written into your own skills directory). Ask for it in a new conversation — "配置手机访问" or "set up phone access" — and the model walks the whole path: the one manual step (nameserver delegation at the registrar), the environment check, the tunnel, the trust entry, the optional Access application, and the first phone pairing. Its body covers Windows, macOS and Linux separately (install commands, `%USERPROFILE%\.cloudflared` versus `~/.cloudflared`, `$env:DSH_HOME` versus `$DSH_HOME`, and the service story for each), and it ends with a troubleshooting table for the failures people actually hit: a 403 from the trust fence, `no active Cloudflare zone`, a stale plugin generation, and the 100 MB upload ceiling.
+Installing the plugin also installs a **runtime skill** named `dsh-remote-access` (registered through `ctx.skills.register`, so disabling the plugin removes it and nothing is written into your own skills directory). Ask for it in a new conversation — "配置远程访问" or "set up phone access" — and the model walks the whole path: the one manual step (nameserver delegation at the registrar), the environment check, the tunnel, the trust entry, the optional Access application, and the first phone pairing. Its body covers Windows, macOS and Linux separately (install commands, `%USERPROFILE%\.cloudflared` versus `~/.cloudflared`, `$env:DSH_HOME` versus `$DSH_HOME`, and the service story for each), and it ends with a troubleshooting table for the failures people actually hit: a 403 from the trust fence, `no active Cloudflare zone`, a stale plugin generation, and the 100 MB upload ceiling.
 
 The panel itself no longer carries the tutorial: it shows state and performs actions, the skill explains them.
 
@@ -215,7 +215,7 @@ Each machine runs its own Harness and its own `cloudflared`, so each panel write
 - **The launch token is per process.** `dsh web` prints a tokenized URL at startup, and this plugin builds the same URL through `ctx.connection.authenticatedUrl()`. Re-opening a fresh entry link re-pairs a phone, which is also how a phone renews an expired cookie.
 - **The cookie is authority-bound.** A phone paired through the tunnel and the same phone paired over the LAN hold different cookies; changing the tunnel hostname invalidates the old one.
 - **Revocation is all-or-nothing inside the Harness.** *Revoke every paired browser session* deletes the `client-connection/browser-session` credential record. The running process still holds the signing secret in memory, so the effect lands at the next start — the panel says exactly that. For per-identity revocation, revoke the Cloudflare Access session.
-- **The heartbeat asset is public.** `/mobile-console/heartbeat.js` is served like any other static asset: it carries no secret, and it only pings when the page itself was already authenticated. The heartbeat endpoint behind it is fenced.
+- **The heartbeat asset is public.** `/remote-access/heartbeat.js` is served like any other static asset: it carries no secret, and it only pings when the page itself was already authenticated. The heartbeat endpoint behind it is fenced.
 - **Config writes are explicit.** Every write goes through `ctx.configEditor`, which persists into your own profile patch layer and reconciles through the normal Loader path. Writes that would freeze inherited values (the `webserver` row's `host`) restate the live values, and the panel labels them as needing a restart.
 
 ## Tests

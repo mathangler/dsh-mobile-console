@@ -1,7 +1,7 @@
 {
-  "name": "dsh-mobile-console",
+  "name": "dsh-remote-access",
   "version": "0.1.0",
-  "description": "Mobile access for DeepSeek Harness: one settings panel that publishes the phone entry URLs and QR codes, sets the tunnel hostname up through the Cloudflare API or a guided cloudflared login, writes the authority into the platform trust fence, manages the cloudflared child process, lists devices that recently connected, and revokes every paired browser session.",
+  "description": "Remote access for DeepSeek Harness: one settings panel that publishes the phone entry URLs and QR codes, sets the tunnel hostname up through the Cloudflare API or a guided cloudflared login, writes the authority into the platform trust fence, manages the cloudflared child process, lists devices that recently connected, and revokes every paired browser session.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -37,7 +37,7 @@
     "deepseek-harness",
     "cordis",
     "plugin",
-    "mobile",
+    "remote-access",
     "cloudflare-tunnel",
     "skill",
     "qr"
