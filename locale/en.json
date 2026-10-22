@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Mobile Access",
-    "description": "Reach this Harness from a phone: entry links with QR codes, automatic Cloudflare tunnel setup (API token or guided browser login), a read-only device view, and one button that revokes every paired browser session."
+    "title": "Remote Access",
+    "description": "Reach this Harness from any remote device: entry links with QR codes, automatic Cloudflare tunnel setup (API token or guided browser login), one-time pairing codes, a device-token list you can rename, re-date and revoke per device, a read-only device view, and an optional password door for recovery."
   }
 }

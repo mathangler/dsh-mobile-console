@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "手机访问",
-    "description": "用手机访问这台 Harness：带二维码的入口链接、Cloudflare 隧道自动配置（API Token 或引导浏览器登录）、只读设备列表，以及一键撤销全部已配对浏览器会话。"
+    "title": "远程访问",
+    "description": "从任意远程设备访问这台 Harness：带二维码的入口链接、Cloudflare 隧道自动配置（API Token 或引导浏览器登录）、一次性配对码、可逐台改名/改有效期/撤销的设备令牌列表、只读设备列表，以及可选的恢复密码门。"
   }
 }
