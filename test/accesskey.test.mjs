@@ -35,6 +35,7 @@ import {
   CHANNEL,
   deviceDeletable,
   deviceStatus,
+  localDialTarget,
   migrateLegacyDeviceRows,
   modeFromBindHost,
   parseDeviceRows,
@@ -270,8 +271,8 @@ test('derives the mode from the address the listener is bound to', () => {
 });
 
 test('resolves link authorities in order, and says how far they reach', () => {
-  const lan = { bindHost: '10.0.161.47', port: 3080, requestHost: '10.0.161.47:3080', requestScheme: 'http' };
-  const loopback = { bindHost: '127.0.0.1', port: 3080, requestHost: '127.0.0.1:3080', requestScheme: 'http' };
+  const lan = { bindHost: '10.0.161.47', port: 3080, requestHost: '10.0.161.47:3080', requestScheme: 'http', tunnelRunning: true };
+  const loopback = { bindHost: '127.0.0.1', port: 3080, requestHost: '127.0.0.1:3080', requestScheme: 'http', tunnelRunning: true };
 
   // (a) An advertised public URL wins over everything, scheme as configured.
   assert.deepEqual(resolveLinkBase({ ...loopback, publicUrl: 'https://dsh.example.com/', tunnelHost: 'other.example.com' }), {
@@ -293,7 +294,7 @@ test('resolves link authorities in order, and says how far they reach', () => {
   });
   assert.equal(resolveLinkBase({ publicUrl: 'http://10.0.161.47:3080' }).reachable, 'lan');
   // A scheme-less advertised name is a public one, so it gets https.
-  assert.deepEqual(resolveLinkBase({ publicUrl: 'dsh.example.com' }), {
+  assert.deepEqual(resolveLinkBase({ publicUrl: 'dsh.example.com', tunnelRunning: true }), {
     base: 'dsh.example.com',
     scheme: 'https',
     reachable: 'public',
@@ -305,7 +306,7 @@ test('resolves link authorities in order, and says how far they reach', () => {
     scheme: 'https',
     reachable: 'public',
   });
-  assert.deepEqual(resolveLinkBase({ tunnelHost: 'dsh.example.com:8443' }), {
+  assert.deepEqual(resolveLinkBase({ tunnelHost: 'dsh.example.com:8443', tunnelRunning: true }), {
     base: 'dsh.example.com:8443',
     scheme: 'https',
     reachable: 'public',
@@ -341,6 +342,37 @@ test('resolves link authorities in order, and says how far they reach', () => {
   assert.deepEqual(resolveLinkBase({}), { base: '127.0.0.1:3080', scheme: 'http', reachable: 'loopback-only' });
   assert.equal(resolveLinkBase({ bindHost: '10.0.161.47', port: Number.NaN }).base, '10.0.161.47:3080', 'a nonsense port falls back');
   assert.equal(resolveLinkBase({ bindHost: '10.0.161.47', port: 0 }).base, '10.0.161.47:3080');
+});
+
+test('only claims a public link while something actually serves it', () => {
+  const tunnel = 'dsh.example.com';
+  // The base is still the right link to hand out...
+  assert.equal(resolveLinkBase({ tunnelHost: tunnel, tunnelRunning: false }).base, tunnel);
+  // ...but a stopped tunnel is not a reachable public link.
+  assert.equal(resolveLinkBase({ tunnelHost: tunnel, tunnelRunning: false }).reachable, 'loopback-only');
+  assert.equal(resolveLinkBase({ tunnelHost: tunnel, tunnelRunning: false, bindHost: '10.0.161.47' }).reachable, 'lan');
+  assert.equal(resolveLinkBase({ tunnelHost: tunnel, tunnelRunning: true }).reachable, 'public');
+  assert.equal(resolveLinkBase({ tunnelHost: tunnel }).reachable, 'loopback-only', 'no running tunnel, no public claim');
+  assert.equal(resolveLinkBase({ publicUrl: 'https://dsh.example.com/', tunnelRunning: false }).reachable, 'loopback-only');
+  assert.equal(resolveLinkBase({ publicUrl: 'https://dsh.example.com/', tunnelRunning: false, bindHost: '192.168.31.186' }).reachable, 'lan');
+  assert.equal(resolveLinkBase({ publicUrl: 'https://dsh.example.com/', tunnelRunning: true }).reachable, 'public');
+  // A LAN base is not gated: nothing about it depends on the tunnel.
+  assert.equal(resolveLinkBase({ bindHost: '10.0.161.47', port: 3080, tunnelRunning: false }).reachable, 'lan');
+});
+
+test('dials the listener it is actually bound to', () => {
+  assert.deepEqual(localDialTarget('127.0.0.1', 3080), { host: '127.0.0.1', port: 3080 });
+  assert.deepEqual(localDialTarget('10.0.161.47', 3199), { host: '10.0.161.47', port: 3199 }, 'LAN mode dials the LAN address, not loopback');
+  assert.deepEqual(localDialTarget('192.168.31.186', 3080), { host: '192.168.31.186', port: 3080 });
+  assert.deepEqual(localDialTarget('::1', 3080), { host: '::1', port: 3080 });
+  assert.deepEqual(localDialTarget('fe80::1%12', 3080), { host: 'fe80::1%12', port: 3080 });
+  // A wildcard binds every interface, loopback included, so loopback is right.
+  assert.deepEqual(localDialTarget('0.0.0.0', 3080), { host: '127.0.0.1', port: 3080 });
+  assert.deepEqual(localDialTarget('::', 3080), { host: '127.0.0.1', port: 3080 });
+  assert.deepEqual(localDialTarget('', 3080), { host: '127.0.0.1', port: 3080 });
+  assert.deepEqual(localDialTarget(undefined, undefined), { host: '127.0.0.1', port: 3080 });
+  assert.deepEqual(localDialTarget('not-an-address', 3080), { host: '127.0.0.1', port: 3080 });
+  assert.deepEqual(localDialTarget('10.0.161.47', 0), { host: '10.0.161.47', port: 3080 });
 });
 
 test('keeps the new records under the plugin scope, apart from the legacy ones', () => {
@@ -721,7 +753,7 @@ test('exchanges a launch token for the platform cookie, keeping ours', async () 
   // The platform's verdict comes first: an accepted caller is forwarded, never
   // bounced through a fresh launch token — the loop that would otherwise never
   // end, since the token visit redirects back to `/`.
-  const forwarded = hostCtx({ connection: { requestRejection: () => undefined }, port: 0 });
+  const forwarded = hostCtx({ connection: { requestRejection: () => undefined }, port: 9 });
   const answer = fakeResponse();
   await forwarded.routes.exact.get('/')(
     fakeRequest(undefined, { method: 'GET', url: '/', headers: { cookie: 'mc-device=whatever' } }),
@@ -729,7 +761,7 @@ test('exchanges a launch token for the platform cookie, keeping ours', async () 
   );
   assert.notEqual(answer.statusCode, 303, 'an accepted caller is never redirected through a launch token');
   assert.equal(await waitFor(() => answer.body !== undefined), true, 'the index forward ran');
-  assert.equal(answer.statusCode, 502, 'and failed closed, because nothing listens on port 0');
+  assert.equal(answer.statusCode, 502, 'and failed closed, because nothing listens on that port');
 });
 
 test('bootstraps a loopback launch-token visit through the platform authorizer', async () => {
@@ -767,7 +799,7 @@ test('bootstraps a loopback launch-token visit through the platform authorizer',
   const stale = fakeResponse();
   await root(fakeRequest(undefined, { ...local, url: '/?token=stale' }), stale);
   assert.equal(stale.statusCode, 401);
-  const plain = hostCtx({ connection: { requestRejection: () => undefined }, port: 0 });
+  const plain = hostCtx({ connection: { requestRejection: () => undefined }, port: 9 });
   const forwarded = fakeResponse();
   await plain.routes.exact.get('/')(fakeRequest(undefined, { url: '/', headers: { host: '127.0.0.1:3080' }, remoteAddress: '127.0.0.1', method: 'GET' }), forwarded);
   assert.equal(await waitFor(() => forwarded.body !== undefined), true);
@@ -827,9 +859,10 @@ test('mints a one-time link for an existing device without touching it', async (
   // The source row is byte-for-byte what it was.
   assert.equal(JSON.stringify(rows.find((row) => row.id === source.id)), snapshot);
 
-  // Unknown id: a clear error, and nothing minted.
+  // Unknown id: a dedicated refusal the panel can branch on, and nothing minted.
   const missing = await endpoint(ctx, 'device-link', { id: 'nope' });
   assert.equal(missing.ok, false);
+  assert.equal(missing.error.code, 'remote-access/device-not-found');
   assert.match(missing.error.message, /no authorized device with id "nope"/);
   assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 2, 'a failed link adds no row');
 
