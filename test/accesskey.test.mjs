@@ -41,6 +41,7 @@ import {
   patchRowConfig,
   publicDeviceRow,
   publicKeyRow,
+  readRowConfigList,
   resolveLinkBase,
   storablePayload,
 } from '../lib/index.js';
@@ -800,6 +801,47 @@ test('serves the pairing door with or without a password, and stays quiet otherw
   assert.equal((await route(ctx, `${CHANNEL}/unlock/pair`, { code: second.value.code }, { method: 'POST' })).ok, true, 'and the pairing door keeps working');
 });
 
+test('mints a one-time link for an existing device without touching it', async () => {
+  const ctx = hostCtx();
+  const created = await endpoint(ctx, 'key-create', { name: 'Phone' });
+  await endpoint(ctx, 'token', { key: created.value.key });
+  const before = ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices;
+  assert.equal(before.length, 1);
+  const source = before[0];
+  const snapshot = JSON.stringify(source);
+
+  const linked = await endpoint(ctx, 'device-link', { id: source.id });
+  assert.equal(linked.ok, true, JSON.stringify(linked.error));
+  assert.equal(linked.value.id, source.id);
+  assert.ok(isTempToken(new URL(linked.value.url).searchParams.get('token')), 'the link carries a temp token');
+  assert.ok(Number.isInteger(linked.value.qr?.size));
+  assert.ok(Math.abs(linked.value.expiresAt - Date.now() - TEMP_TOKEN_TTL_MS) < 5000, 'fifteen minutes, as promised');
+
+  const rows = ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices;
+  assert.equal(rows.length, 2, 'a new row, not a rewritten one');
+  const added = rows.find((row) => row.id !== source.id);
+  assert.equal(added.temporary, true);
+  assert.equal(added.source, source.source, 'the source is copied');
+  assert.match(added.name, /· 链接$/);
+  assert.notEqual(added.hash, source.hash, 'and the device keeps its own credential');
+  // The source row is byte-for-byte what it was.
+  assert.equal(JSON.stringify(rows.find((row) => row.id === source.id)), snapshot);
+
+  // Unknown id: a clear error, and nothing minted.
+  const missing = await endpoint(ctx, 'device-link', { id: 'nope' });
+  assert.equal(missing.ok, false);
+  assert.match(missing.error.message, /no authorized device with id "nope"/);
+  assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 2, 'a failed link adds no row');
+
+  // And it is rate limited like the other mint operations.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    assert.equal((await endpoint(ctx, 'device-link', { id: source.id })).ok, true, `mint ${attempt + 2}`);
+  }
+  const throttled = await endpoint(ctx, 'device-link', { id: source.id });
+  assert.equal(throttled.ok, false);
+  assert.match(throttled.error.message, /too many links/);
+});
+
 test('reports the mode and switches the bind without starting a tunnel', async () => {
   const ctx = hostCtx();
   const status = await endpoint(ctx, 'mode-status', {});
@@ -878,6 +920,15 @@ test('rewrites only the named keys of one profile row', () => {
   const crlf = patch.replace(/\n/g, '\r\n');
   assert.ok(patchRowConfig(crlf, 'webserver', { host: '10.0.0.9' }).includes('\r\n    host: 10.0.0.9\r\n'));
 
+  // Reading a list back out of the file is what makes a merge safe.
+  assert.deepEqual(readRowConfigList(patch, 'connection', 'trustedHosts'), {
+    present: true,
+    values: ['dsh-win.example.com:443', '192.168.31.186:3199'],
+  });
+  assert.deepEqual(readRowConfigList(patch, 'webserver', 'trustedHosts'), { present: false, values: [] });
+  assert.deepEqual(readRowConfigList('- id: x\n  config:\n    hosts: [a, "b c"]\n', 'x', 'hosts'), { present: true, values: ['a', 'b c'] });
+  assert.deepEqual(readRowConfigList(patch, 'nope', 'trustedHosts'), { present: false, values: [] });
+
   // Refusals, so the caller can fall back rather than guess.
   assert.equal(patchRowConfig('id: not-a-sequence\n', 'webserver', { host: 'x' }), undefined);
   assert.equal(patchRowConfig('- id: webserver\n  config: { host: 127.0.0.1 }\n', 'webserver', { host: 'x' }), undefined);
@@ -946,6 +997,17 @@ test('switches the bind through the profile patch, merging trusted hosts', async
     const repeat = await endpoint(wired, 'set-mode', { mode: 'lan', host: '10.0.161.47' });
     assert.equal(repeat.ok, true);
     assert.equal(readFileSync(path, 'utf8'), afterLan, 'a repeat is a no-op');
+
+    // The file, not the (possibly stale) live row, is what a merge reads: an
+    // entry another writer added after the row was built must survive.
+    writeFileSync(path, afterLan.replace('      - 10.0.161.47:3080\n', '      - 10.0.161.47:3080\n      - 10.0.97.10:3199\n'));
+    const mergedAgain = await endpoint(wired, 'set-mode', { mode: 'lan', host: '10.0.161.47' });
+    assert.deepEqual(
+      mergedAgain.value.trustedHosts,
+      ['dsh-win.mathangler.site', '10.0.161.47:3080', '10.0.97.10:3199'],
+      'a host the file holds is never dropped by a later switch',
+    );
+    assert.ok(readFileSync(path, 'utf8').includes('      - 10.0.97.10:3199\n'));
 
     // And the way back works — in the same process, which the platform editor
     // could no longer do once its HMR transaction had been nested.
