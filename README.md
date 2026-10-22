@@ -83,6 +83,27 @@ With no domain at all, two options remain:
 - **Quick tunnel.** `cloudflared tunnel --url http://127.0.0.1:3080` prints a random `*.trycloudflare.com` URL with no account and no domain. The platform's fence refuses an authority nobody declared, so press *Trust this temporary domain* in the panel: the plugin writes that hostname into `trustedHosts` through the Config Editor, which reconciles the row in place. The hostname changes on every start, so the phone pairs again each time — fine for a test, tedious for daily use.
 - **Tailscale.** A tailnet gives the machine a stable `machine.tailnet-name.ts.net` hostname with a real certificate and no domain purchase. Declare that hostname once and it keeps working; the phone needs the Tailscale app.
 
+### Which access paths can coexist
+
+The platform binds **one** concrete address and refuses wildcards, so of these three paths you can have any two — and the recommended pair is loopback plus tunnel:
+
+| Configuration | Desktop on `127.0.0.1` | Phone over the internet | Phone on the same Wi-Fi |
+|---|---|---|---|
+| `host: 127.0.0.1`, tunnel dialling `127.0.0.1` | yes | yes (through Cloudflare) | only through the tunnel |
+| `host: 10.0.161.47`, tunnel dialling `10.0.161.47` | **no** | yes | yes, direct |
+
+The first row is what the panel's *Restore the loopback bind* button returns you to, and it is the only configuration where the desktop keeps the default address. The second row is worth it only when LAN-direct speed matters more than loopback: a listener bound to one literal does not answer on `127.0.0.1`.
+
+### Why there is no automatic "am I at home?" switch
+
+Three constraints make an honest one impossible:
+
+1. **One listener, one address.** Nothing listens on loopback *and* a LAN literal at once, and a plugin cannot add a second listener for the shipped `/api` route (the route table rejects a duplicate prefix).
+2. **DNS has already answered.** When the phone opens `https://win.example.com`, that name resolves to Cloudflare's edge, so the request has already crossed the internet. A server-side redirect could only make *later* requests direct, and it lands on a second authority (`http://10.0.161.47:3080`) — a second cookie and a second pairing.
+3. **A public switch would leak access.** A plugin route that hands a phone a tokenized LAN URL hands that token to anyone who can reach the route. Gating it needs a pairing code, a second authentication path this plugin deliberately does not have.
+
+What the panel does instead is report the truth: *How this panel is being reached right now* for the browser in front of you, a **Reached via** column per device (`tunnel` / `local network` / `this machine`), and a `same network` badge when a phone's address shares a /24 with one of this machine's addresses.
+
 ### Local network entry, and what it costs
 
 The shipped listener binds exactly one concrete address and the platform refuses wildcards, so **binding a local address replaces the loopback listener**: after a restart `http://127.0.0.1:3080` stops answering and the desktop must use that address too. Measured, not assumed — a listener bound to `10.0.161.47` refuses `127.0.0.1`.

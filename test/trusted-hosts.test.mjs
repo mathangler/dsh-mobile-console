@@ -10,6 +10,9 @@ import {
   probeTrust,
   upsertDevice,
   pruneDevices,
+  classifyRequestOrigin,
+  isPrivateAddress,
+  sameLan,
 } from '../lib/index.js';
 
 test('normalizes the row config with defaults and rejects nonsense', () => {
@@ -154,4 +157,52 @@ test('upserts and prunes device rows', () => {
   for (let i = 0; i < 60; i++) many = upsertDevice(many, { id: `d${i}`, ua: 'Android Chrome', now: t0 + i });
   assert.equal(many.length, 50);
   assert.equal(many[0].id, 'd59');
+});
+
+test('classifies where a request came from', () => {
+  // cloudflared runs on this machine, so a tunnelled request arrives over
+  // loopback and carries Cloudflare's client-IP header.
+  assert.deepEqual(classifyRequestOrigin({ 'cf-connecting-ip': '203.0.113.7' }, '127.0.0.1'), {
+    via: 'tunnel',
+    clientIp: '203.0.113.7',
+  });
+  assert.deepEqual(classifyRequestOrigin({ 'x-forwarded-for': '203.0.113.7, 10.0.0.1' }, '127.0.0.1'), {
+    via: 'tunnel',
+    clientIp: '203.0.113.7',
+  });
+  // A phone on the same Wi-Fi reaches the listener with its own address.
+  assert.deepEqual(classifyRequestOrigin({}, '10.0.161.23'), { via: 'lan', clientIp: '10.0.161.23' });
+  assert.deepEqual(classifyRequestOrigin({}, '::ffff:192.168.1.9'), { via: 'lan', clientIp: '192.168.1.9' });
+  // The desktop on this machine.
+  assert.deepEqual(classifyRequestOrigin({}, '127.0.0.1'), { via: 'local', clientIp: '127.0.0.1' });
+  assert.deepEqual(classifyRequestOrigin({}, '::1'), { via: 'local', clientIp: '::1' });
+  // A public peer with no proxy header is unusual but must not be called local.
+  assert.deepEqual(classifyRequestOrigin({}, '203.0.113.7'), { via: 'direct', clientIp: '203.0.113.7' });
+  assert.deepEqual(classifyRequestOrigin({}, undefined), { via: 'unknown', clientIp: undefined });
+  // Empty headers are ignored rather than treated as a proxy.
+  assert.equal(classifyRequestOrigin({ 'cf-connecting-ip': '  ' }, '10.0.0.5').via, 'lan');
+});
+
+test('recognizes private addresses and the machine’s own subnet', () => {
+  for (const address of ['10.0.0.1', '10.255.255.254', '172.16.0.1', '172.31.255.1', '192.168.1.1', 'fd00::1']) {
+    assert.equal(isPrivateAddress(address), true, address);
+  }
+  for (const address of ['172.15.0.1', '172.32.0.1', '8.8.8.8', '203.0.113.7', '2001:db8::1', '', 'nonsense']) {
+    assert.equal(isPrivateAddress(address), false, address);
+  }
+  const mine = [{ address: '10.0.161.47', interface: 'WLAN' }];
+  assert.equal(sameLan('10.0.161.23', mine), true, 'same /24');
+  assert.equal(sameLan('10.0.68.140', mine), false, 'different /24');
+  assert.equal(sameLan('8.8.8.8', mine), false, 'public address is never the LAN');
+  assert.equal(sameLan(undefined, mine), false);
+});
+
+test('keeps the last-seen route on a device row', () => {
+  const t0 = 2_000_000;
+  const first = upsertDevice([], { id: 'p', ua: 'iPhone', ip: '203.0.113.7', via: 'tunnel', now: t0 });
+  assert.equal(first[0].lastVia, 'tunnel');
+  const second = upsertDevice(first, { id: 'p', ua: 'iPhone', ip: '10.0.161.23', via: 'lan', now: t0 + 1000 });
+  assert.equal(second[0].lastVia, 'lan');
+  assert.equal(second[0].lastIp, '10.0.161.23');
+  assert.equal(second[0].firstSeenAt, t0);
 });
