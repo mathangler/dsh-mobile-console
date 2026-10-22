@@ -14,6 +14,8 @@ import {
   isPrivateAddress,
   sameLan,
   absentText,
+  SECRET_REF_RE,
+  SECRET_REFS,
 } from '../lib/index.js';
 import { skillRegistration, SKILL_NAME } from '../lib/skill.js';
 
@@ -207,6 +209,21 @@ test('keeps the last-seen route on a device row', () => {
   assert.equal(second[0].lastVia, 'lan');
   assert.equal(second[0].lastIp, '10.0.161.23');
   assert.equal(second[0].firstSeenAt, t0);
+});
+
+test('every stored secret ref can be parsed back at startup', () => {
+  // The credentials document is validated against this pattern when it loads, so
+  // a name that does not match fails the *next startup*, not the call that wrote
+  // it. That is exactly how "dsh-mobile-console/unlock-secret" once bricked a
+  // boot: the plugin called set() with a slash and the file became unloadable.
+  for (const ref of SECRET_REFS) {
+    assert.match(ref, SECRET_REF_RE, `${ref} must be a legal env-style credential ref`);
+  }
+  assert.ok(SECRET_REFS.length >= 2, 'the Cloudflare token and the connector token are both stored');
+  assert.ok(!SECRET_REF_RE.test('dsh-mobile-console/unlock-secret'), 'a slashed ref is rejected');
+  assert.ok(!SECRET_REF_RE.test('1LEADING_DIGIT'), 'a leading digit is rejected');
+  assert.ok(!SECRET_REF_RE.test(''), 'an empty ref is rejected');
+  assert.ok(SECRET_REF_RE.test('CLOUDFLARE_API_TOKEN'));
 });
 
 test('treats every browser spelling of absent as not set', () => {
