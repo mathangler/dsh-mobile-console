@@ -16,6 +16,7 @@
     "lib/index.js",
     "lib/cloudflare.js",
     "lib/cloudflared.js",
+    "lib/skill.js",
     "lib/qr.js",
     "lib/client.js",
     "lib/assets/heartbeat.js",
@@ -37,6 +38,7 @@
     "plugin",
     "mobile",
     "cloudflare-tunnel",
+    "skill",
     "qr"
   ],
   "dsh": {

@@ -14,6 +14,7 @@ import {
   isPrivateAddress,
   sameLan,
 } from '../lib/index.js';
+import { skillRegistration, SKILL_NAME } from '../lib/skill.js';
 
 test('normalizes the row config with defaults and rejects nonsense', () => {
   const defaults = normalizeConfig(undefined);
@@ -205,4 +206,40 @@ test('keeps the last-seen route on a device row', () => {
   assert.equal(second[0].lastVia, 'lan');
   assert.equal(second[0].lastIp, '10.0.161.23');
   assert.equal(second[0].firstSeenAt, t0);
+});
+
+test('registers the setup skill with all three platforms covered', () => {
+  const skill = skillRegistration('mobile-console');
+  assert.equal(skill.name, SKILL_NAME);
+  assert.equal(skill.source, 'runtime');
+  assert.equal(skill.provider, 'mobile-console');
+  assert.deepEqual(skill.invocation, { modelInvocable: true, userInvocable: true });
+  assert.equal(skill.resourceBase.kind, 'opaque');
+  assert.ok(skill.description.length > 40, 'the catalog needs a real description');
+  assert.ok(skill.whenToUse.length > 20);
+
+  // The body must be usable on Windows, macOS and Linux: install commands per
+  // platform, both cloudflared directory spellings, both env-var spellings, and
+  // the service story for each.
+  for (const needle of [
+    'Windows',
+    'macOS',
+    'Linux',
+    'winget install',
+    'brew install',
+    'apt install',
+    'dnf install',
+    '%USERPROFILE%',
+    '~/.cloudflared',
+    '$env:DSH_HOME',
+    'systemd',
+    'launchd',
+  ]) {
+    assert.ok(skill.content.includes(needle), `skill body mentions ${needle}`);
+  }
+  // It must state the manual step, the upload ceiling and the restart rule
+  // rather than leaving them to be discovered.
+  assert.match(skill.content, /Add a site/);
+  assert.match(skill.content, /100 MB/);
+  assert.match(skill.content, /重启 dsh/);
 });

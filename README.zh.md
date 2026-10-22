@@ -81,6 +81,12 @@ dsh plugin --profile web add /absolute/path/to/dsh-mobile-console
 
 唯一 API 做不到的一步是注册商处的 NS 修改——包括腾讯云/DNSPod 注册的域名：先在 Cloudflare 添加域名，再把 DNSPod 的 DNS 服务器换成 Cloudflare 分配的那两个。留在 DNSPod 的记录会随之失效，所以企业邮箱/其它站点要先导入 Cloudflare（添加站点时它提供导入）。等 zone 状态变成 **Active**（几分钟到 24 小时）后，自动配置才能找到它。
 
+### 随插件安装的配置 skill
+
+装插件的同时会装一个名为 `dsh-mobile-access` 的**运行时 skill**（通过 `ctx.skills.register` 注册，禁用插件即移除，不会往你的 skills 目录写任何文件）。在新对话里说一句"配置手机访问"就会触发它，模型会带着走完整条路：唯一的人工步骤（注册商处改 NS）、环境检测、建隧道、写信任栅栏、可选的 Access 应用、以及手机首次配对。它的正文**分别覆盖 Windows / macOS / Linux**（安装命令、`%USERPROFILE%\.cloudflared` 与 `~/.cloudflared`、`$env:DSH_HOME` 与 `$DSH_HOME`、各自的常驻方式），末尾还有一张针对真实会遇到的故障表：信任栅栏 403、`no active Cloudflare zone`、插件旧代码、100 MB 上传上限。
+
+面板本身不再放教程：面板显示状态并执行操作，说明交给 skill。
+
 ### Harness 重启后手机需要重新授权吗？
 
 **不需要。** 启动令牌是每次进程生成的，但它只用于**首次**换取 Cookie：那个 Cookie 用持久化在 `$DSH_HOME/.credentials.yaml` 的密钥签名，所以已配对的手机在重启后依然有效，直到 `cookieMaxAgeDays`（默认 30 天）到期。只有这些情况才需要重新配对：Cookie 到期、你按了"撤销全部已配对浏览器会话"、凭据文件被删除、域名变了（Cookie 绑定 authority），或 Cloudflare Access 会话到期——而最后这一种要的是重新过一次邮箱验证码，不是重新配对。

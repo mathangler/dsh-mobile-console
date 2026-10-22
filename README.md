@@ -81,6 +81,12 @@ Secrets live in the Harness credential store (`CLOUDFLARE_API_TOKEN`, `CLOUDFLAR
 
 The one step no API can do is the nameserver change at your registrar — including for a domain registered at Tencent Cloud/DNSPod: add the domain in Cloudflare, then replace DNSPod's nameservers with the two Cloudflare assigns. Records still living at DNSPod stop answering, so import anything else you need (mail, other sites) into Cloudflare first; Cloudflare offers an import during onboarding. Wait for the zone to show **Active** (minutes to 24 hours) before the automatic setup can find it.
 
+### The setup skill
+
+Installing the plugin also installs a **runtime skill** named `dsh-mobile-access` (registered through `ctx.skills.register`, so disabling the plugin removes it and nothing is written into your own skills directory). Ask for it in a new conversation — "配置手机访问" or "set up phone access" — and the model walks the whole path: the one manual step (nameserver delegation at the registrar), the environment check, the tunnel, the trust entry, the optional Access application, and the first phone pairing. Its body covers Windows, macOS and Linux separately (install commands, `%USERPROFILE%\.cloudflared` versus `~/.cloudflared`, `$env:DSH_HOME` versus `$DSH_HOME`, and the service story for each), and it ends with a troubleshooting table for the failures people actually hit: a 403 from the trust fence, `no active Cloudflare zone`, a stale plugin generation, and the 100 MB upload ceiling.
+
+The panel itself no longer carries the tutorial: it shows state and performs actions, the skill explains them.
+
 ### Does a Harness restart require re-pairing the phone?
 
 No. The launch token is per process, but it is only needed for the *initial* exchange: the cookie it mints is signed with a secret persisted in `$DSH_HOME/.credentials.yaml`, so a paired phone keeps working across restarts for `cookieMaxAgeDays` (default 30 days). Re-pairing is needed only when the cookie lifetime runs out, when you press *Revoke every paired browser session*, when the credentials file is deleted, when the hostname changes (cookies are bound to an authority), or when the Cloudflare Access session expires — and that last one asks for an email one-time PIN rather than a new pairing.
