@@ -28,11 +28,11 @@ Four kinds of credential can get a device in, and all four become rows in the sa
 **It does not build a second mobile UI.** The phone uses the shipped Web UI. The layout already collapses its sidebar below 1024px, so a phone gets a usable single-column conversation with every feature the desktop has. That choice has two costs, and both are worth stating plainly:
 
 - **The device holds owner-level access.** It is the same UI, so it can do everything the desktop can. The boundary is the platform cookie plus the tunnel identity, not a reduced feature set.
-- **The platform cookie cannot be revoked per device.** The platform keeps no per-device state for browser cookies, and a plugin cannot insert middleware into the shipped `/api` route. Revoking the cookie happens all at once. Per-device revocation exists only for the credentials this plugin issues.
+- **The platform cookie cannot be revoked by this plugin at all.** `dsh-auth-*` is signed by the harness, bound to the authority and persisted in the home directory, so no button here — and not a restart either — invalidates an established session; it ends when it expires, after 30 days. Revoking an authorized device kills the credentials this plugin issued, and nothing more.
 
 It also deliberately does the following, or refuses to:
 
-- **It cannot mint platform tokens.** The launch token belongs to the running process. A "temporary token" here is a plugin credential that is exchanged for a platform entry link; it is not a platform token.
+- **It cannot mint platform tokens, and it never hands out the launch token.** The only per-process secret is the one the harness itself prints (`dsh web`); every redirect the plugin generates is a bare `/`, the session arrives as a cookie from a server-side exchange, and a plugin-minted link never contains that token.
 - **It never slides a lifetime.** No hidden renewal extends anything: what the panel shows is what expires.
 - **It does not enforce Cloudflare Access.** Access is optional, and when it is on it sits in front of everything on that hostname — including the pairing-code and password pages.
 - **It does not switch automatically between LAN and tunnel.** One listener binds one address, and DNS has already answered by the time a request arrives; the panel reports the path actually taken instead.
@@ -196,19 +196,29 @@ The panel itself carries no tutorial: it shows state and performs actions, the s
 
 | Source | What it is | Lifetime | Revocation |
 |---|---|---|---|
-| **Entry link** | The platform's per-process launch token, exchanged once for the platform cookie. The first pairing also writes a device record. | The link dies with the process; the record lasts **30 days**, matching the platform cookie. | The record is revoked per device. The platform cookie itself can only be revoked **all at once**. |
+| **Entry link** | The harness's own bootstrap: the URL carrying the per-process token the harness itself printed (`dsh web`), which the panel shows. A device record is minted only when the platform accepts the presented token, and entry-link rows live in their own bucket of 3, so a flood of anonymous visits cannot evict real authorized devices. | The link dies with the process; the record lasts **30 days**, matching the platform cookie. | Revoking the record kills the plugin-issued credential and the one-time links derived from it. It does not end a session the browser already holds. |
 | **One-time pairing code** | Eight characters from an alphabet without `0`/`O`/`1`/`I`/`L`, generatable only from an authorized session, rate-limited. The QR encodes a URL carrying the code. | **10 minutes, single use.** It carries the lifetime the new device's record gets: never / 30 / 90 / 365 days / a custom date. | Consumed on use; the record it wrote stays revocable. |
 | **Access key** | A named key `dra_…`, shown once, stored only as a sha256 fingerprint; exchanged at `POST /remote-access/token`. | The key is a stored credential; the link it mints is **15 minutes and single use**. | Revoke or reset each key individually. |
-| **Password** (optional, fail-closed) | Challenge-response: PBKDF2-SHA256, 600,000 iterations, plus an HMAC over a single-use nonce, so the password never crosses the network. | A one-time link valid for **at most 15 minutes**; a page-close beacon invalidates it early, best effort. | Remove the password (which also revokes outstanding tickets). |
+| **Password** (optional, fail-closed) | Challenge-response: PBKDF2-SHA256, 600,000 iterations, then an HMAC over the decoded challenge nonce, so the password never crosses the network. | A one-time link valid for **at most 15 minutes**; the page also invalidates it on close, best effort — backgrounding the tab counts as closing, so a link can burn early. | Remove the password (which also revokes outstanding tickets). |
+
+### What a revoke does
+
+- **It kills the credentials this plugin issued:** that device's device credential, its outstanding one-time links (and the link rows derived from it, which are revoked with it), and the short-lived unlock ticket.
+- **It does not kill a session the browser already holds.** Revoking an authorized device is not the same as logging that browser out.
+- **The platform's own cookie cannot be revoked by this plugin.** `dsh-auth-*` is signed by the harness and bound to the authority. It is not invalidated by a per-device revoke, by the wholesale **Revoke every paired browser session** button, or even by a **restart** — the signing secret is persisted in the home directory. It ends when it expires, after 30 days.
+- **The plugin never hands out the launch token.** Every redirect it generates is a bare `/`, and the session arrives as a cookie from a server-side exchange. The only per-process secret is the token the harness itself prints (`dsh web`), and a plugin-minted link never contains it.
+
+### The public doors
+
+`/remote-access/unlock`, `/unlock/*`, `/remote-access/token` and `/remote-access/page-close` require `content-type: application/json` and refuse cross-site requests (a foreign `Origin`, or `Sec-Fetch-Site: cross-site`). Rate limits are per client — 5 attempts per 15 minutes — keyed on the socket address unless the peer is the loopback proxy, which is what cloudflared and the desktop shell are; the global budget is a backstop, not a lockout.
+
+Pairing codes are 8 characters from an alphabet without `0`/`O`/`1`/`I`/`L`, valid for 10 minutes and single use: redemption is a compare-and-swap, so concurrent redemptions yield exactly one winner, and only an authorized session can mint one. The password door is PBKDF2-SHA256 (600k iterations) followed by an HMAC over the decoded challenge nonce, so the password never crosses the network; on success it hands out a one-time link valid at most 15 minutes. Fail-closed: with no password stored the page renders nothing, `GET /` returns the platform's own 401 and `/remote-access/unlock` returns 404. Cloudflare Access stays optional and is not enforced by the plugin — when it is on, it sits in front of the whole hostname, including the pairing-code and password pages.
 
 ### Honest limits
 
-- **Per-device revocation covers plugin-issued credentials.** The platform's browser cookie cannot be revoked per device — only wholesale with **Revoke every paired browser session**, which deletes the platform's session record and takes effect at the next restart.
-- **The plugin cannot mint platform tokens.** A temp token is a plugin credential that is exchanged for a platform entry link; the platform still issues the cookie.
 - **Nothing slides.** No hidden renewal extends any credential: what the panel shows is what expires. Using a device credential only refreshes its "last used" stamp and client IP.
-- **No password means no recovery surface.** With no password stored, the recovery page renders nothing and the public surface stays silent: an unauthenticated visit to the hostname receives the platform's own 401, and `/remote-access/unlock` answers 404.
-- **Cloudflare Access is optional and not enforced by the plugin.** The panel only reports whether an Access application fronts the hostname. When it is on, it sits in front of everything on that hostname, including the pairing-code and password pages.
-- **The platform's fence authenticates every panel call.** Each panel request calls `ctx.connection.requestRejection(req)` first and returns its verdict before reading a byte of the body; the pairing-code, access-key and password doors authenticate their own callers, because they must work precisely when the platform credential has lapsed.
+- **A closed page can burn a one-time link early.** The password page invalidates its link on close, best effort, and backgrounding the tab counts as closing it; the 15-minute expiry is the real control.
+- **The platform's fence authenticates every panel call.** Each panel request calls `ctx.connection.requestRejection(req)` first and returns its verdict before reading a byte of the body; the public doors authenticate their own callers, because they must work precisely when the platform credential has lapsed.
 - **`DSH_*` variables belong to the launcher environment.** Export them where you start dsh; any `DSH_*` entry in a `.env` file makes startup throw.
 - **The tunnel is public.** Whoever learns the hostname reaches this Harness, so the credentials above are what stands between them and the UI.
 
