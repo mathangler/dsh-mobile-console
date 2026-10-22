@@ -29,7 +29,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "check": "node test/qr.test.mjs && node test/trusted-hosts.test.mjs && node test/unlock.test.mjs && node test/cloudflare.test.mjs && node test/cloudflared.test.mjs && node test/client-load.test.mjs && node test/accesskey.test.mjs"
+    "check": "node test/qr.test.mjs && node test/trusted-hosts.test.mjs && node test/unlock.test.mjs && node test/cloudflare.test.mjs && node test/cloudflared.test.mjs && node test/client-load.test.mjs && node test/accesskey.test.mjs && node test/pages.test.mjs"
   },
   "license": "MIT",
   "keywords": [

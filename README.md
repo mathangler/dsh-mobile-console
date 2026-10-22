@@ -1,54 +1,57 @@
 # dsh-remote-access
 
-Mobile access for [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh): reach the Harness Web UI from a phone, and manage that access from one settings page.
+Remote access for [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh): reach the Harness Web UI from a phone or another device, and manage every door into it from one settings page.
 
 English | [中文](README.zh.md)
 
 ## What it does
 
-The Harness already ships everything a phone needs: a browser UI, a per-process launch token exchanged for a signed cookie, a Host/Origin trust fence, and a listener that can bind one concrete interface address. What it does not ship is the part around it — knowing *which* URL to open, whether the tunnel authority is trusted, whether `cloudflared` is running, which devices have connected, and how to revoke them.
+The Harness already ships the hard half: a browser UI, a per-process launch token exchanged for a signed cookie, a Host/Origin trust fence, and a listener that can bind one concrete interface address. What it does not ship is the part around it — the switch between "only this computer and its Wi-Fi" and "the internet", the credentials other devices use, which of them are still alive, and how to take one back.
 
-This plugin is that part, and nothing more:
+This plugin is that part:
 
 | Panel section | What it gives you |
 |---|---|
-| **Entry links** | The tunnel and LAN entry URLs, each carrying the process's fresh launch token, with a QR code to scan and a copy button |
-| **Trust verdict** | Whether the platform's `/api` fence accepts the tunnel authority, and one button that writes it into the shipped `connection` row |
-| **Local network entry** | The machine's non-loopback addresses, and one button that binds the listener to one of them |
-| **cloudflared child process** | Detect the binary, start/stop a named tunnel as a managed child, and show its recent output |
-| **Cloudflare setup** | An environment checklist (binary, certificate, stored tokens, hostname), a guided browser login that shows the authorization URL, a one-click API-token setup, optional Access creation, and teardown |
-| **Setup skill** | Installing the plugin installs `dsh-remote-access`, so a new conversation can walk the whole configuration |
-| **Session renewal** | Every app load re-mints the phone's cookie with a full lifetime, plus a manual *Renew this device now* button |
-| **Advertised URL** | One button that makes the platform advertise the tunnel hostname, and one that puts it back to `127.0.0.1` |
-| **Devices** | A read-only view of the phones that recently loaded the UI (name, client, first/last seen, address) |
-| **Pairing lifetime** | The platform's real `cookieMaxAgeDays`, and one button that revokes every paired browser session |
-| **Phone layout** | A switch for the narrow-viewport tweaks (touch-sized controls, 16px inputs, safe-area padding) |
+| **Access mode** | A two-way switch, **Local network** / **Public**, auto-detected from the current bind and overridable. Only the selected mode's settings render. |
+| **Entry link** | The tokenized URL the device opens, with a QR code. Under **Local network** it is labelled *Temporary: it dies with this process*; the platform's launch token is per process either way. |
+| **One-time pairing code** | Eight characters, ten minutes, single use, with a QR code that carries the code in a URL — for a device that cannot reach this screen's QR code. |
+| **Authorized devices** | The authority list: every credential this machine handed out (source, temporary/long-lived, created, last used + client IP, explicit expiry, status), each revocable, renamable and re-datable on its own. |
+| **Cloudflare tunnel** | A prominent **Start tunnel** button, the child process's state and recent output, and the hostname the tunnel serves. |
+| **Edge authentication** | Whether a Cloudflare Access application fronts the hostname — a status line that turns warning-coloured when it is off. |
+| **Advanced** | The Cloudflare setup (environment check, guided browser login, API token, teardown), the access keys, the recovery password, and the phone-layout tweak. |
+| **Setup skill** | Installing the plugin installs `dsh-remote-access`, so a new conversation can walk the whole configuration. |
+
+Four kinds of credential can get a device in, and all four become rows in the same **Authorized devices** list: the **entry link**, a **one-time pairing code**, an **access key**, and the optional **password**. Their exact parameters are in [The four credential sources](#the-four-credential-sources).
 
 ## What it deliberately does not do
 
-**It does not build a second mobile UI.** The phone uses the shipped Web UI. The layout already collapses its sidebar to a 56px rail below 1024px (`dsh-client-ui-layout`, `SIDEBAR_AUTO_COLLAPSE`), so a phone gets a usable single-column conversation with every feature the desktop has — sessions, workspaces, approvals, settings, files.
+**It does not build a second mobile UI.** The phone uses the shipped Web UI. The layout already collapses its sidebar below 1024px, so a phone gets a usable single-column conversation with every feature the desktop has. That choice has two costs, and both are worth stating plainly:
 
-That choice has two costs, and both are worth stating plainly:
+- **The device holds owner-level access.** It is the same UI, so it can do everything the desktop can. The boundary is the platform cookie plus the tunnel identity, not a reduced feature set.
+- **The platform cookie cannot be revoked per device.** The platform keeps no per-device state for browser cookies, and a plugin cannot insert middleware into the shipped `/api` route. Revoking the cookie happens all at once. Per-device revocation exists only for the credentials this plugin issues.
 
-- **The phone holds owner-level access.** It is the same UI, so it can do everything the desktop can, including changing permission presets and installing plugins. The boundary is the tunnel identity (Cloudflare Access) plus the platform cookie, not a reduced feature set.
-- **There is no per-device revocation inside the Harness.** The platform keeps no per-device state for browser cookies, and a plugin cannot add a middleware to the shipped `/api` route (the route table matches exact-then-longest-prefix and rejects a duplicate registration). Revocation therefore happens at the tunnel identity (revoke the user's Cloudflare Access session) or all at once, with the panel's *Revoke every paired browser session* button.
+It also deliberately does the following, or refuses to:
 
-The device list is a **view, not an authority**: the injected heartbeat records which phone loaded the page, and that row cannot revoke anything.
+- **It cannot mint platform tokens.** The launch token belongs to the running process. A "temporary token" here is a plugin credential that is exchanged for a platform entry link; it is not a platform token.
+- **It never slides a lifetime.** No hidden renewal extends anything: what the panel shows is what expires.
+- **It does not enforce Cloudflare Access.** Access is optional, and when it is on it sits in front of everything on that hostname — including the pairing-code and password pages.
+- **It does not switch automatically between LAN and tunnel.** One listener binds one address, and DNS has already answered by the time a request arrives; the panel reports the path actually taken instead.
+- **It does not read `DSH_*` from a `.env` file.** Those variables must be exported in the launcher environment; any `DSH_*` in a `.env` makes startup throw.
 
 ## Requirements
 
-- A DeepSeek Harness install with a `web` profile. This is a **profile bundle**: it adds one host row and one settings section, nothing else.
-- `cloudflared` — only for remote access. The panel detects it, shows the install command for your platform, and the guided login or an API token does the rest. Loopback-only use needs nothing.
-- A domain whose DNS Cloudflare serves — only for remote access. No public server, no open inbound port.
+- A DeepSeek Harness install with a `web` profile. This is a **profile bundle**: it adds one host row (`id: remote-access-panel`) and one settings section, nothing else.
+- `cloudflared` — only for public access. The panel detects it, shows the install command for your platform, and either the guided login or an API token does the rest. Local-network-only use needs nothing.
+- A domain whose DNS Cloudflare serves — only for public access. No public server, no open inbound port.
 - Node 20+ and no runtime dependencies (the plugin uses `node:crypto` and the platform's own services).
 
 ## Install
 
 ```sh
-# from GitHub (pnpm resolves the default branch)
+  # from GitHub (pnpm resolves the default branch)
 dsh plugin --profile web add github:mathangler/dsh-remote-access
 
-# or from a checkout on disk — the form used while developing this plugin
+  # or from a checkout on disk — the form used while developing this plugin
 dsh plugin --profile web add /absolute/path/to/dsh-remote-access
 ```
 
@@ -59,7 +62,7 @@ Then:
 1. **Restart the Harness.** The host half — routes, the managed tunnel child, the setup skill — is loaded at startup.
 2. Open **Settings → Remote Access**. That section is the whole interface.
 
-Installing also installs the setup skill, so a new conversation can walk the whole configuration for you: ask it to *configure phone access*.
+Installing also installs the setup skill, so a new conversation can walk the whole configuration for you: ask it to *set up remote access*.
 
 ## Update
 
@@ -68,7 +71,7 @@ dsh plugin --profile web add github:mathangler/dsh-remote-access   # re-resolve 
 dsh plugin --profile web update dsh-remote-access                  # or update the dependency
 ```
 
-Then restart the Harness. Everything the panel wrote survives an update, because it lives in **your** profile patch layer rather than in the package: the hostname, the tunnel name, the `trustedHosts` entry, the advertised URL and the cloudflared settings. The device list and the Cloudflare credentials live in the Harness credential store and survive as well.
+Then restart the Harness. Everything the panel wrote survives an update, because it lives in **your** profile patch layer rather than in the package: the hostname, the tunnel name, the LAN bind, the advertised URL, the `trustedHosts` entry and the cloudflared settings. The credential records and the Cloudflare secrets live in the Harness credential store and survive as well.
 
 ## Uninstall
 
@@ -82,26 +85,64 @@ Deliberately left behind, because they are yours:
 
 | What | Where | How to clean it |
 |---|---|---|
-| Row config the panel wrote (hostname, tunnel name, advertised URL) | your profile's `cordis.patch.yml`, the `id: remote-access-panel` entry | delete that entry |
+| The credential records (`devices`, `devices-v2`, `access-keys`, `recovery`, `device-tokens`, `pair-codes`, all under the `dsh-remote-access/` scope) | the Harness credential store | revoke and delete the rows in the panel, and remove the recovery password, *before* removing the plugin |
+| Row config the panel wrote (hostname, tunnel name, LAN bind, advertised URL) | your profile's `cordis.patch.yml`, the `id: remote-access-panel` entry | delete that entry |
 | The trust entry | same file, `id: connection` → `trustedHosts` | drop the hostname from the list |
-| The Cloudflare tunnel, its DNS record and the stored connector token | Cloudflare, plus the Harness credential store | press **Teardown** in the panel's Advanced card *before* removing the plugin |
-| The written tunnel config | `~/.cloudflared/dsh-remote-access.yml` | delete the file |
-| A stored Cloudflare API token | the Harness credential store (`CLOUDFLARE_API_TOKEN`) | panel → **Forget the stored API token** |
+| `~/.cloudflared/*` — the tunnel config, the connector credentials file and `cert.pem` | your home directory (`%USERPROFILE%\.cloudflared` on Windows) | delete the files |
+| The DNS record, the tunnel and any Access application this plugin created | Cloudflare | press the teardown button in **Advanced → Cloudflare setup** *before* removing the plugin, or delete them in the dashboard |
+| The stored Cloudflare API token and connector token (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_TUNNEL_TOKEN`) | the Harness credential store | panel → **Forget the stored API token**; teardown removes the connector token |
 
 ## Usage
 
-The panel is a control surface, not a wizard. Five things, in the order you need them:
+### Choose a mode
 
-1. **Fill in two fields** (in the Advanced card): the **hostname** the phone will open, for example `<label>.example.com`, and this machine's **tunnel name**, `<label>`. The panel suggests `<label>` from the machine's own platform — `dsh-mac` on macOS, `dsh-win` on Windows, `dsh-lin` on Linux — because each machine gets its own hostname and tunnel name.
-2. **Create the tunnel**, either way:
+The panel starts on the mode the current bind implies: **Local network** when the listener is bound to one of this machine's own non-loopback addresses, **Public** when it is on `127.0.0.1`. Override it with the two-button switch at the top. Switching writes the profile config and **requires a dsh restart**; after a switch to Local network the desktop must use the new address too (a listener bound to one literal stops answering on `127.0.0.1`).
+
+### LAN steps
+
+1. Switch to **Local network** and pick an address from the list.
+2. **Restart dsh.** The bind is a listener option, so the panel says a restart is required instead of restarting the process under you.
+3. Open the entry link, or scan its QR code with the device. It is labelled **Temporary: it dies with this process**.
+4. Nothing else is needed: there is **no device management in this mode**, because the platform's launch token dies with the process and this plugin keeps no long-lived record for it.
+5. To go back, press **Restore the loopback bind (127.0.0.1)** and restart.
+
+### Public steps
+
+1. Switch to **Public**. The listener stays on `127.0.0.1`.
+2. Under **Advanced → Cloudflare setup**, fill in the hostname the device will open (for example `dsh-win.example.com`) and this machine's tunnel name (`dsh-win`), then create the tunnel either way:
    - **Check the environment → Start the browser login → Create the tunnel and configure**, or
    - paste a Cloudflare API token → **Set up automatically**.
-   Both create the tunnel, publish the DNS record, write `~/.cloudflared/dsh-remote-access.yml` and put the hostname into the platform's trust fence. Start the browser login **from the panel**: a login process started in a terminal is short-lived, gets killed before it can write `cert.pem`, and the authorization then looks like it did nothing.
-3. **Press Start** on the cloudflared card. The tunnel runs as a child of the Harness: it starts when you start it, and it stops with the plugin or a restart.
-4. **Scan the entry QR code with the phone.** That single visit exchanges the process launch token for a signed cookie. The first arrival from a QR code or another app needs one refresh — the platform's cookie is `SameSite=Strict`, so it is not sent on the redirect that follows a cross-site navigation. Pasting the link into the address bar works first time.
-5. **Optionally create the Access application** (same card) so Cloudflare asks for an e-mail one-time PIN before any traffic reaches this machine.
+   Both publish the DNS record, write `~/.cloudflared/dsh-remote-access.yml` and put the hostname into the platform's trust fence. Start the browser login **from the panel**: a login process started in a terminal is short-lived, gets killed before it can write `cert.pem`, and the authorization then looks like it did nothing.
+3. Press the prominent **Start tunnel** button on the Cloudflare tunnel card (the card's filled primary button, labelled **Start**). The tunnel runs as a child of the Harness and stops with the plugin or a restart.
+4. Pair a device: scan the entry link's QR code, or generate a pairing code (next section).
+5. Optionally create the Access application so Cloudflare asks for an e-mail one-time PIN before any traffic reaches this machine.
 
-Day to day the phone stays paired by itself: every app load asks the host for a fresh tokenized URL, which re-mints the cookie with a full lifetime. Open the app at least once a month and it never lapses; **Renew this device now** does the same on demand. Revocation is all-at-once — **Revoke every paired browser session** (needs a restart, because the running process holds the old signing secret) — or per identity in Cloudflare Access. The device list is a **view**, not an authorization list.
+The entry link's first visit exchanges the process launch token for the platform cookie. From a QR code or another app that first landing usually needs one refresh — the platform cookie is `SameSite=Strict`, so it is not sent on the redirect that follows a cross-site navigation. Pasting the link into the address bar works first time.
+
+### Add a device by code or QR
+
+In the **Public** mode, the panel's pairing card generates a **one-time pairing code**: eight characters from an alphabet without `0`, `O`, `1`, `I` or `L`. It is valid for **ten minutes**, works **once**, is rate-limited, and can only be generated **from an authorized session**. The panel shows the code and a QR code; the QR encodes a URL carrying the code, so the new device can scan it or type it by hand.
+
+Before generating, choose the **lifetime** the new device's record gets: *never expires*, 30 days, 90 days, 1 year, or a custom date (the host default for an unspecified lifetime is one year). The record then appears in **Authorized devices** with that expiry.
+
+### Use an access key
+
+Under **Advanced → Access keys**, press **Create access key** and give it a name. The key looks like `dra_…`, is shown **exactly once**, and is stored on this machine only as its sha256 fingerprint — copy it now, or reset it later to get a new one. Present it at `POST /remote-access/token` and the answer is a **15-minute, single-use** entry link: it forwards that browser into the app once and is burned on use, whether or not it had already expired.
+
+Keys can be revoked one by one, which kills the key immediately, or reset, which invalidates the old secret and shows a new one once.
+
+### Recover with the password
+
+Under **Advanced → Recovery access**, set a password of at least 12 characters. Verification is challenge-response: the host sends a single-use nonce and a salt, the browser derives a key with PBKDF2-SHA256 (600,000 iterations) and answers with an HMAC over the nonce. **The password never crosses the network.** On success the host hands back a one-time link valid for **at most 15 minutes**; a page-close beacon invalidates it early on a best-effort basis.
+
+With no password stored, the recovery page renders **nothing at all** and the public surface stays silent: an unauthenticated visit to the hostname gets the platform's own 401, and `/remote-access/unlock` returns 404.
+
+The recovery order, in the order to try it:
+
+1. **The device record** — a device that paired once carries a plugin credential, and a lapsed platform cookie is renewed automatically when it returns.
+2. **An access key** — exchange it at `POST /remote-access/token` for a fresh single-use link.
+3. **The password** — visit `https://<hostname>/remote-access/unlock` and answer the challenge.
+4. **Reach the computer** — with none of the three, re-pairing needs the machine itself.
 
 ## Configure
 
@@ -112,111 +153,62 @@ Everything lives in the plugin row's `config`, and the panel writes it into your
     - id: remote-access-panel
       name: dsh-remote-access
       config:
-        tunnelHost: dsh.example.com
-        publicUrl: https://dsh.example.com
+        tunnelHost: dsh-win.example.com
+        publicUrl: https://dsh-win.example.com
         lanHost: 10.0.161.47
+        tunnelName: dsh-win
+        accessEmail: you@example.com
         cloudflared:
           command: cloudflared
-          args: ['tunnel', 'run', 'dsh-mobile']
+          args: ['tunnel', 'run', 'dsh-win']
         narrowEnhance: true
         deviceRetentionDays: 180
 ```
 
 | Field | Meaning |
 |---|---|
-| `tunnelHost` | The authority the tunnel serves. The entry link and its QR appear only once this is set. |
+| `tunnelHost` | The authority the tunnel serves. The public entry link and its QR appear only once this is set. |
 | `publicUrl` | Optional advertised root URL (what the Harness prints and puts in `DSH_WEB_URL`). |
 | `lanHost` | Optional concrete local interface literal for a LAN entry. Wildcards are refused by the platform itself. |
+| `tunnelName` | The tunnel the automatic setup creates or reuses (default `dsh-remote-access`; use one name per machine). |
+| `accessEmail` | The email the optional Cloudflare Access policy allows. |
 | `cloudflared` | Optional command to manage as a child process. Omit it to run your tunnel yourself. |
 | `narrowEnhance` | Apply the phone layout tweaks below 1024px (default `true`). |
-| `deviceRetentionDays` | Drop device rows unseen for this long (default 180). |
+| `deviceRetentionDays` | Drop activity rows unseen for this long (default 180). |
 
-### Automatic setup from the panel
+Secrets never live here: the Cloudflare API token, the connector token, the access keys and the recovery password live in the Harness credential store, under `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_TUNNEL_TOKEN` and the plugin's own `dsh-remote-access/*` records.
 
-The *Cloudflare setup* card does the tunnel work for you. It first **checks the environment** — whether `cloudflared` is installed (and its version), whether `cert.pem` exists, whether an API token or connector token is stored, whether a hostname is configured — and then offers whichever path fits:
-
-- **No cloudflared?** The card shows the install command for your platform (`winget install --id Cloudflare.cloudflared`, `brew install cloudflared`, or the release page) and a *Check the environment* button to re-test after installing.
-- **Browser authorization.** *Start the browser login* runs `cloudflared tunnel login`, captures the `dash.cloudflare.com/argotunnel` URL it prints and shows it in the panel (the tab cloudflared opens works too), polls until `cert.pem` appears, then *Create the tunnel and configure* runs `tunnel create`, `tunnel route dns`, writes `~/.cloudflared/dsh-remote-access.yml`, and adds the hostname to the platform trust fence.
-- **API token.** Paste a token with the permissions the card lists, press *Save and verify*, then *Set up automatically*: the plugin creates or reuses a remotely-managed tunnel, points its ingress at the local listener, publishes the proxied CNAME, stores the connector token, and trusts the hostname. No browser, no `cert.pem`.
-- **Access (optional).** Give an email and press *Create the Access application* for a self-hosted application with a one-time-PIN policy and a one-month session. The card also reports whether the Zero Trust organization has any login method at all.
-- **Teardown.** One button deletes the DNS record and tunnel this plugin created and forgets the stored connector token.
-
-Secrets live in the Harness credential store (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_TUNNEL_TOKEN`), never in configuration and never in a response. Every other value is written into your own profile patch layer.
-
-The one step no API can do is the nameserver change at your registrar — including for a domain registered at Tencent Cloud/DNSPod: add the domain in Cloudflare, then replace DNSPod's nameservers with the two Cloudflare assigns. Records still living at DNSPod stop answering, so import anything else you need (mail, other sites) into Cloudflare first; Cloudflare offers an import during onboarding. Wait for the zone to show **Active** (minutes to 24 hours) before the automatic setup can find it.
+The row id is `remote-access-panel`, **not** `remote-access`: the shipped `dsh-base` bundle already owns `remote-access` for a platform plugin, and the Loader dedupes rows by id without a diagnostic — reusing that id would silently drop the shipped row and break the UI's RPC.
 
 ### The setup skill
 
-Installing the plugin also installs a **runtime skill** named `dsh-remote-access` (registered through `ctx.skills.register`, so disabling the plugin removes it and nothing is written into your own skills directory). Ask for it in a new conversation — "配置远程访问" or "set up phone access" — and the model walks the whole path: the one manual step (nameserver delegation at the registrar), the environment check, the tunnel, the trust entry, the optional Access application, and the first phone pairing. Its body covers Windows, macOS and Linux separately (install commands, `%USERPROFILE%\.cloudflared` versus `~/.cloudflared`, `$env:DSH_HOME` versus `$DSH_HOME`, and the service story for each), and it ends with a troubleshooting table for the failures people actually hit: a 403 from the trust fence, `no active Cloudflare zone`, a stale plugin generation, and the 100 MB upload ceiling.
+Installing the plugin also installs a **runtime skill** named `dsh-remote-access` (registered through `ctx.skills.register`, so disabling the plugin removes it and nothing is written into your own skills directory). Ask for it in a new conversation — "配置远程访问" or "set up remote access" — and the model walks the fixed pipeline: it always asks you for the domain, hostname, mode and setup path instead of assuming them, and it never invents a hostname or runs `cloudflared tunnel login` on your behalf.
 
-The panel itself no longer carries the tutorial: it shows state and performs actions, the skill explains them.
+Its body covers Windows, macOS and Linux separately (install commands, `%USERPROFILE%\.cloudflared` versus `~/.cloudflared`, `$env:DSH_HOME` versus `$DSH_HOME`), the four credential sources with their real parameters, the recovery order, and a troubleshooting table for the failures people actually hit: the trust fence's 403, `no active Cloudflare zone`, a stale plugin generation, an expired one-time link, and the 100 MB upload ceiling.
 
-### Does a Harness restart require re-pairing the phone?
-
-No. The launch token is per process, but it is only needed for the *initial* exchange: the cookie it mints is signed with a secret persisted in `$DSH_HOME/.credentials.yaml`, so a paired phone keeps working across restarts for `cookieMaxAgeDays` (default 30 days). Re-pairing is needed only when the cookie lifetime runs out, when you press *Revoke every paired browser session*, when the credentials file is deleted, when the hostname changes (cookies are bound to an authority), or when the Cloudflare Access session expires — and that last one asks for an email one-time PIN rather than a new pairing.
-
-### Cloudflare walkthrough
-
-1. **Domain.** A domain registered anywhere works, as long as its DNS is served by Cloudflare: add the domain as a zone in the Cloudflare dashboard and change its nameservers at your registrar to the two Cloudflare assigns. Cloudflare does not sell or give away domains — it hosts DNS for the one you own.
-2. **Tunnel.** `cloudflared tunnel login`, `cloudflared tunnel create dsh-mobile`, then route your hostname to it (`cloudflared tunnel route dns dsh-mobile dsh.example.com`). Put `tunnel: run dsh-mobile` under `config.cloudflared.args` to let the panel manage the process.
-3. **Trust the authority.** Open the panel, and press *Add this authority to trustedHosts*. Without it the UI loads but every `/api` call answers 403: the platform's fence only accepts loopback, the listener's own bind address, or a declared authority.
-4. **Optional — Cloudflare Access.** In Zero Trust, create a self-hosted Access application for `dsh.example.com` with a One-time PIN policy for your own email address, and set the session duration (the default is 24 hours; up to one month is allowed). Access then authenticates the device at the edge, and revoking its session there is your per-identity revocation.
-
-### Do I need a public server?
-
-No. `cloudflared` dials **out** from this machine to Cloudflare's edge, and Cloudflare routes your hostname back down that connection. There is no inbound port, no public IP, and no VPS. What the tunnel does need is a hostname whose DNS Cloudflare serves — so a domain is the one thing you must have. Cloudflare does not give domains away; a cheap registration is enough, and a free third-party domain works only if its operator lets you delegate the nameservers to Cloudflare.
-
-With no domain at all, two options remain:
-
-- **Quick tunnel.** `cloudflared tunnel --url http://127.0.0.1:3080` prints a random `*.trycloudflare.com` URL with no account and no domain. The platform's fence refuses an authority nobody declared, so press *Trust this temporary domain* in the panel: the plugin writes that hostname into `trustedHosts` through the Config Editor, which reconciles the row in place. The hostname changes on every start, so the phone pairs again each time — fine for a test, tedious for daily use.
-- **Tailscale.** A tailnet gives the machine a stable `machine.tailnet-name.ts.net` hostname with a real certificate and no domain purchase. Declare that hostname once and it keeps working; the phone needs the Tailscale app.
-
-### Which access paths can coexist
-
-The platform binds **one** concrete address and refuses wildcards, so of these three paths you can have any two — and the recommended pair is loopback plus tunnel:
-
-| Configuration | Desktop on `127.0.0.1` | Phone over the internet | Phone on the same Wi-Fi |
-|---|---|---|---|
-| `host: 127.0.0.1`, tunnel dialling `127.0.0.1` | yes | yes (through Cloudflare) | only through the tunnel |
-| `host: 10.0.161.47`, tunnel dialling `10.0.161.47` | **no** | yes | yes, direct |
-
-The first row is what the panel's *Restore the loopback bind* button returns you to, and it is the only configuration where the desktop keeps the default address. The second row is worth it only when LAN-direct speed matters more than loopback: a listener bound to one literal does not answer on `127.0.0.1`.
-
-### Why there is no automatic "am I at home?" switch
-
-Three constraints make an honest one impossible:
-
-1. **One listener, one address.** Nothing listens on loopback *and* a LAN literal at once, and a plugin cannot add a second listener for the shipped `/api` route (the route table rejects a duplicate prefix).
-2. **DNS has already answered.** When the phone opens `https://win.example.com`, that name resolves to Cloudflare's edge, so the request has already crossed the internet. A server-side redirect could only make *later* requests direct, and it lands on a second authority (`http://10.0.161.47:3080`) — a second cookie and a second pairing.
-3. **A public switch would leak access.** A plugin route that hands a phone a tokenized LAN URL hands that token to anyone who can reach the route. Gating it needs a pairing code, a second authentication path this plugin deliberately does not have.
-
-What the panel does instead is report the truth: *How this panel is being reached right now* for the browser in front of you, a **Reached via** column per device (`tunnel` / `local network` / `this machine`), and a `same network` badge when a phone's address shares a /24 with one of this machine's addresses.
-
-### Local network entry, and what it costs
-
-The shipped listener binds exactly one concrete address and the platform refuses wildcards, so **binding a local address replaces the loopback listener**: after a restart `http://127.0.0.1:3080` stops answering and the desktop must use that address too. Measured, not assumed — a listener bound to `10.0.161.47` refuses `127.0.0.1`.
-
-A tunnel does not need a LAN bind at all, because `cloudflared` runs on this same machine and dials `127.0.0.1`. Keeping the default loopback is therefore how you get local *and* remote access at once. Bind a local address only if you also want a phone on the same Wi-Fi to reach the Harness directly; the panel has a *Restore the loopback bind* button for when you change your mind.
-
-### Two machines (for example a Windows desktop and a Mac)
-
-Give each machine its **own hostname** and its **own tunnel**:
-
-| Machine | Tunnel | DNS route | Access application | `tunnelHost` |
-|---|---|---|---|---|
-| Windows | `dsh-win` | `win.example.com` | `win.example.com` (or one wildcard `*.example.com`) | `win.example.com` |
-| Mac | `dsh-mac` | `mac.example.com` | `mac.example.com` | `mac.example.com` |
-
-Each machine runs its own Harness and its own `cloudflared`, so each panel writes only its own authority into its own `trustedHosts`. Do not point both hostnames at one tunnel: a Harness is stateful, so a request that lands on the wrong machine shows the wrong sessions. Cookies are bound to an authority, so each machine pairs separately — which is what you want, since the two Harnesses hold different sessions.
+The panel itself carries no tutorial: it shows state and performs actions, the skill explains them.
 
 ## Security model
 
-- **The platform authenticates, not this plugin.** Every panel request calls `ctx.connection.requestRejection(req)` first — the shipped Host/Origin fence plus the login-token/cookie check — and returns its status before reading a byte of the body. This is the same convention the shipped open-in-app plugin follows; nothing here is hand-rolled.
-- **The launch token is per process.** `dsh web` prints a tokenized URL at startup, and this plugin builds the same URL through `ctx.connection.authenticatedUrl()`. Re-opening a fresh entry link re-pairs a phone, which is also how a phone renews an expired cookie.
-- **The cookie is authority-bound.** A phone paired through the tunnel and the same phone paired over the LAN hold different cookies; changing the tunnel hostname invalidates the old one.
-- **Revocation is all-or-nothing inside the Harness.** *Revoke every paired browser session* deletes the `client-connection/browser-session` credential record. The running process still holds the signing secret in memory, so the effect lands at the next start — the panel says exactly that. For per-identity revocation, revoke the Cloudflare Access session.
-- **The heartbeat asset is public.** `/remote-access/heartbeat.js` is served like any other static asset: it carries no secret, and it only pings when the page itself was already authenticated. The heartbeat endpoint behind it is fenced.
-- **Config writes are explicit.** Every write goes through `ctx.configEditor`, which persists into your own profile patch layer and reconciles through the normal Loader path. Writes that would freeze inherited values (the `webserver` row's `host`) restate the live values, and the panel labels them as needing a restart.
+### The four credential sources
+
+| Source | What it is | Lifetime | Revocation |
+|---|---|---|---|
+| **Entry link** | The platform's per-process launch token, exchanged once for the platform cookie. The first pairing also writes a device record. | The link dies with the process; the record lasts **30 days**, matching the platform cookie. | The record is revoked per device. The platform cookie itself can only be revoked **all at once**. |
+| **One-time pairing code** | Eight characters from an alphabet without `0`/`O`/`1`/`I`/`L`, generatable only from an authorized session, rate-limited. The QR encodes a URL carrying the code. | **10 minutes, single use.** It carries the lifetime the new device's record gets: never / 30 / 90 / 365 days / a custom date. | Consumed on use; the record it wrote stays revocable. |
+| **Access key** | A named key `dra_…`, shown once, stored only as a sha256 fingerprint; exchanged at `POST /remote-access/token`. | The key is a stored credential; the link it mints is **15 minutes and single use**. | Revoke or reset each key individually. |
+| **Password** (optional, fail-closed) | Challenge-response: PBKDF2-SHA256, 600,000 iterations, plus an HMAC over a single-use nonce, so the password never crosses the network. | A one-time link valid for **at most 15 minutes**; a page-close beacon invalidates it early, best effort. | Remove the password (which also revokes outstanding tickets). |
+
+### Honest limits
+
+- **Per-device revocation covers plugin-issued credentials.** The platform's browser cookie cannot be revoked per device — only wholesale with **Revoke every paired browser session**, which deletes the platform's session record and takes effect at the next restart.
+- **The plugin cannot mint platform tokens.** A temp token is a plugin credential that is exchanged for a platform entry link; the platform still issues the cookie.
+- **Nothing slides.** No hidden renewal extends any credential: what the panel shows is what expires. Using a device credential only refreshes its "last used" stamp and client IP.
+- **No password means no recovery surface.** With no password stored, the recovery page renders nothing and the public surface stays silent: an unauthenticated visit to the hostname receives the platform's own 401, and `/remote-access/unlock` answers 404.
+- **Cloudflare Access is optional and not enforced by the plugin.** The panel only reports whether an Access application fronts the hostname. When it is on, it sits in front of everything on that hostname, including the pairing-code and password pages.
+- **The platform's fence authenticates every panel call.** Each panel request calls `ctx.connection.requestRejection(req)` first and returns its verdict before reading a byte of the body; the pairing-code, access-key and password doors authenticate their own callers, because they must work precisely when the platform credential has lapsed.
+- **`DSH_*` variables belong to the launcher environment.** Export them where you start dsh; any `DSH_*` entry in a `.env` file makes startup throw.
+- **The tunnel is public.** Whoever learns the hostname reaches this Harness, so the credentials above are what stands between them and the UI.
 
 ## Tests
 
@@ -224,18 +216,25 @@ Each machine runs its own Harness and its own `cloudflared`, so each panel write
 npm run check
 ```
 
-- `test/qr.test.mjs` — the hand-written QR encoder. Its golden matrices were produced by the reference `qrcode` npm package (byte mode, pinned masks) and match this encoder for **every error-correction level, versions 1–10 and all eight masks** (152 matrices). The suite also checks the function patterns, the always-dark module, the remainder bits, and the Reed–Solomon root property.
-- `test/trusted-hosts.test.mjs` — config normalization, bind-address admission (wildcards refused), the trust probe's 403/401/throw cases, device labelling, and the device view's upsert/prune/cap rules.
-- `test/client-load.test.mjs` — runs `lib/client.js` in a minimal module-loader and React stub, then asserts the module id, the inject list, the one `settings.section` registration, the two stylesheets, and the locale dictionaries.
+- `test/qr.test.mjs` — the hand-written QR encoder. Its golden matrices were produced by the reference `qrcode` npm package and match this encoder for every error-correction level, versions 1–10 and all eight masks.
+- `test/trusted-hosts.test.mjs` — config normalization, bind-address admission (wildcards refused), the trust probe's 403/401/throw cases, and the device view's upsert/prune/cap rules.
+- `test/unlock.test.mjs` — the password door: PBKDF2 derivation, HMAC proofs, single-use nonces, ticket signing and the rate limiter.
+- `test/accesskey.test.mjs` — access keys and one-time links: minting, sha256 fingerprints, constant-time comparison, single use and expiry.
+- `test/cloudflare.test.mjs` — the Cloudflare API calls, the guided login's state machine, and teardown.
+- `test/cloudflared.test.mjs` — the child-process wrapper: start, stop, output capture and exit reporting.
+- `test/client-load.test.mjs` — runs `lib/client.js` in a minimal module-loader and React stub, then asserts the module id, the inject list, the single `settings.section` registration, the stylesheets and the locale dictionaries.
 
-The plugin has **no runtime dependencies**: no `@deepseek-ai/*` imports, no zod, no bundler. The QR encoder exists precisely because the Harness installation contains no QR library, and a pairing URL that carries a launch token must never be handed to an online QR service.
+The plugin has **no runtime dependencies**: no `@deepseek-ai/*` imports, no zod, no bundler. The QR encoder exists precisely because the Harness installation contains no QR library, and a pairing URL that carries a credential must never be handed to an online QR service.
 
 ## Limitations
 
-- The narrow-viewport tweaks are CSS-only and are applied at page load, so a desktop window resized down to phone width after loading keeps the desktop sizing until reload.
-- The device list only knows about phones that loaded the UI while the plugin was installed and the heartbeat could reach the host.
-- The cloudflared child process is managed only while this Harness process runs; a tunnel started outside the panel is reported as unconfigured rather than adopted.
-- Approval cards and the rest of the UI are the shipped ones — this plugin adds no phone-specific interaction.
+- **One listener, one address.** Loopback, a LAN literal and the tunnel cannot all be live at once: binding a local address replaces the loopback listener, so `http://127.0.0.1:3080` stops answering and the desktop must use the new address too.
+- **LAN mode has no device management.** A platform launch token dies with the process, so that mode shows only the entry link, its QR code and the way back to loopback.
+- **The cloudflared child process is managed only while this Harness process runs.** A tunnel started outside the panel is reported as unconfigured rather than adopted.
+- **The activity list only knows what the heartbeat saw.** It records devices that loaded the UI while the plugin was installed and the heartbeat could reach the host; it is a sighting log, not an authorization.
+- **A quick tunnel changes hostname on every start**, so it must be trusted again and the device pairs again each time.
+- **The narrow-viewport tweaks are CSS-only** and applied at page load, so a desktop window resized down to phone width keeps the desktop sizing until reload.
+- **Approval cards and the rest of the UI are the shipped ones** — this plugin adds no phone-specific interaction.
 
 ## License
 
