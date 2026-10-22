@@ -74,9 +74,31 @@ Everything lives in the plugin row's `config`, and the panel writes it into your
 3. **Trust the authority.** Open the panel, and press *Add this authority to trustedHosts*. Without it the UI loads but every `/api` call answers 403: the platform's fence only accepts loopback, the listener's own bind address, or a declared authority.
 4. **Optional — Cloudflare Access.** In Zero Trust, create a self-hosted Access application for `dsh.example.com` with a One-time PIN policy for your own email address, and set the session duration (the default is 24 hours; up to one month is allowed). Access then authenticates the device at the edge, and revoking its session there is your per-identity revocation.
 
-### Local network entry
+### Do I need a public server?
 
-The shipped listener binds one concrete address. To use the LAN entry, bind the machine's own address — `dsh web --host 10.0.161.47`, or the panel's *Bind the listener to this address* button, which writes the live `webserver` row values into your patch. Loopback keeps working either way, so the desktop is unaffected.
+No. `cloudflared` dials **out** from this machine to Cloudflare's edge, and Cloudflare routes your hostname back down that connection. There is no inbound port, no public IP, and no VPS. What the tunnel does need is a hostname whose DNS Cloudflare serves — so a domain is the one thing you must have. Cloudflare does not give domains away; a cheap registration is enough, and a free third-party domain works only if its operator lets you delegate the nameservers to Cloudflare.
+
+With no domain at all, two options remain:
+
+- **Quick tunnel.** `cloudflared tunnel --url http://127.0.0.1:3080` prints a random `*.trycloudflare.com` URL with no account and no domain. The platform's fence refuses an authority nobody declared, so press *Trust this temporary domain* in the panel: the plugin writes that hostname into `trustedHosts` through the Config Editor, which reconciles the row in place. The hostname changes on every start, so the phone pairs again each time — fine for a test, tedious for daily use.
+- **Tailscale.** A tailnet gives the machine a stable `machine.tailnet-name.ts.net` hostname with a real certificate and no domain purchase. Declare that hostname once and it keeps working; the phone needs the Tailscale app.
+
+### Local network entry, and what it costs
+
+The shipped listener binds exactly one concrete address and the platform refuses wildcards, so **binding a local address replaces the loopback listener**: after a restart `http://127.0.0.1:3080` stops answering and the desktop must use that address too. Measured, not assumed — a listener bound to `10.0.161.47` refuses `127.0.0.1`.
+
+A tunnel does not need a LAN bind at all, because `cloudflared` runs on this same machine and dials `127.0.0.1`. Keeping the default loopback is therefore how you get local *and* remote access at once. Bind a local address only if you also want a phone on the same Wi-Fi to reach the Harness directly; the panel has a *Restore the loopback bind* button for when you change your mind.
+
+### Two machines (for example a Windows desktop and a Mac)
+
+Give each machine its **own hostname** and its **own tunnel**:
+
+| Machine | Tunnel | DNS route | Access application | `tunnelHost` |
+|---|---|---|---|---|
+| Windows | `dsh-win` | `win.example.com` | `win.example.com` (or one wildcard `*.example.com`) | `win.example.com` |
+| Mac | `dsh-mac` | `mac.example.com` | `mac.example.com` | `mac.example.com` |
+
+Each machine runs its own Harness and its own `cloudflared`, so each panel writes only its own authority into its own `trustedHosts`. Do not point both hostnames at one tunnel: a Harness is stateful, so a request that lands on the wrong machine shows the wrong sessions. Cookies are bound to an authority, so each machine pairs separately — which is what you want, since the two Harnesses hold different sessions.
 
 ## Security model
 

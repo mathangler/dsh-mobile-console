@@ -74,9 +74,31 @@ dsh plugin --profile web add /absolute/path/to/dsh-mobile-console
 3. **信任该域名。** 打开面板，点"把这个域名加入 trustedHosts"。不做这一步，界面能加载但每次 `/api` 调用都会 403：平台的栅栏只接受回环、监听自身的绑定地址，或已声明的域名。
 4. **可选 —— Cloudflare Access。** 在 Zero Trust 里为 `dsh.example.com` 建一个自托管 Access 应用，用 One-time PIN 策略只允许你自己的邮箱，并设置会话时长（默认 24 小时，最长 1 个月）。这样边缘侧会先认证设备，而在那里撤销会话就是你"按身份撤销"的手段。
 
-### 局域网入口
+### 需要公网服务器吗？
 
-平台的监听只绑定一个具体地址。要用局域网入口，就绑定本机地址——`dsh web --host 10.0.161.47`，或点面板上的"把监听绑定到这个地址"（它会把 `webserver` 行当前生效的值一并写进你的 patch）。无论哪种方式回环都照常可用，桌面端不受影响。
+不需要。`cloudflared` 从这台机器**向外**连接 Cloudflare 边缘，Cloudflare 再把域名顺着这条连接送回来。没有入站端口、没有公网 IP、不需要 VPS。隧道真正需要的只是一个 **DNS 由 Cloudflare 托管**的域名——所以域名是唯一必须有 的东西。Cloudflare 本身不赠送域名；便宜注册一个就够，第三方免费域名只有在允许你把 NS 委派给 Cloudflare 时才可用。
+
+如果完全没有域名，还剩两条路：
+
+- **快速隧道。** `cloudflared tunnel --url http://127.0.0.1:3080` 会给出一个随机 `*.trycloudflare.com` 地址，不需要账号也不需要域名。平台栅栏会拒绝没人声明过的域名，所以在面板上点"信任这个临时域名"：插件会通过 Config Editor 把该域名写进 `trustedHosts`，并就地重建那一行。域名每次启动都会变，因此手机每次都要重新配对——测试够用，日常很烦。
+- **Tailscale。** tailnet 会给机器一个稳定的 `机器名.tailnet-name.ts.net` 域名，自动签发受信任证书，不用买域名。声明一次即可长期有效；手机需要装 Tailscale App。
+
+### 局域网入口，以及它的代价
+
+平台的监听只绑定**一个具体地址**，且拒绝通配地址，所以**绑定局域网地址会顶掉回环监听**：重启后 `http://127.0.0.1:3080` 不再响应，桌面端也必须改用那个地址。这是实测结论而非推测——绑在 `10.0.161.47` 上的监听会拒绝 `127.0.0.1`。
+
+用隧道时**根本不需要**绑定局域网地址，因为 `cloudflared` 就跑在这台机器上、直接连 `127.0.0.1`。因此"保持默认回环"正是同时拿到本地与远程访问的做法。只有当你还想让同一 Wi-Fi 下的手机直连时，才需要绑定局域网地址；面板上有"恢复回环绑定"按钮，改主意了随时可以退回来。
+
+### 两台电脑（比如 Windows 台式机 + Mac）
+
+给每台机器**各自的域名**和**各自的隧道**：
+
+| 机器 | 隧道 | DNS 路由 | Access 应用 | `tunnelHost` |
+|---|---|---|---|---|
+| Windows | `dsh-win` | `win.example.com` | `win.example.com`（或一个通配 `*.example.com`） | `win.example.com` |
+| Mac | `dsh-mac` | `mac.example.com` | `mac.example.com` | `mac.example.com` |
+
+每台机器各跑自己的 Harness 与自己的 `cloudflared`，所以每台的面板只把**自己**的域名写进**自己**的 `trustedHosts`。不要把两个域名指向同一条隧道：Harness 是有状态的，请求落到错误的机器上就会看到错误的会话。Cookie 绑定 authority，因此两台机器各自独立配对——这正是你想要的，因为两台 Harness 的会话本来就不同。
 
 ## 安全模型
 
