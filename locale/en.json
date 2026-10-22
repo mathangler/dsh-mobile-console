@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Mobile Access",
+    "description": "Reach this Harness from a phone: entry URLs and QR codes, the tunnel domain the platform trust fence must accept, the cloudflared child process, the devices that recently connected, and one button that revokes every paired browser session."
+  }
+}

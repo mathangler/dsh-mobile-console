@@ -1,0 +1,51 @@
+{
+  "name": "dsh-mobile-console",
+  "version": "0.1.0",
+  "description": "Mobile access for DeepSeek Harness: one settings panel that shows the phone entry URLs and QR codes, writes the tunnel domain into the platform trust fence, manages the cloudflared child process, lists devices that recently connected, and revokes every paired browser session.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/qr.js",
+    "lib/client.js",
+    "lib/assets/heartbeat.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "node test/qr.test.mjs && node test/trusted-hosts.test.mjs && node test/client-load.test.mjs"
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "mobile",
+    "cloudflare-tunnel",
+    "qr"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Mobile console">
+  <defs>
+    <linearGradient id="mc-screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f6df6"/>
+      <stop offset="1" stop-color="#1b3fae"/>
+    </linearGradient>
+  </defs>
+  <rect x="18" y="4" width="28" height="56" rx="8" fill="url(#mc-screen)"/>
+  <rect x="21.5" y="10" width="21" height="41" rx="4.5" fill="#0d1730"/>
+  <rect x="27" y="54" width="10" height="2.4" rx="1.2" fill="#0d1730" opacity="0.55"/>
+  <path d="M26 22.5 L32.5 28.5 L26 34.5" fill="none" stroke="#8fd0ff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="35" y="32.4" width="6.5" height="2.4" rx="1.2" fill="#8fd0ff"/>
+  <path d="M46 16 A20 20 0 0 1 46 48" fill="none" stroke="#7ea8ff" stroke-width="2.6" stroke-linecap="round" opacity="0.85"/>
+  <path d="M52.5 10 A29 29 0 0 1 52.5 54" fill="none" stroke="#7ea8ff" stroke-width="2.2" stroke-linecap="round" opacity="0.45"/>
+</svg>

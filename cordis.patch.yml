@@ -1,0 +1,32 @@
+# dsh-mobile-console — profile bundle patch.
+#
+# `dsh plugin --profile web add <this package>` runs pnpm in the profile
+# directory and appends every dependency that declares `dsh.bundle` to
+# `dsh.profile.bundles`. This patch therefore lands after the shipped bundles
+# and before the user's own cordis.patch.yml, so a user can still override or
+# disable the row below by id.
+#
+# One row: the host half. The browser half needs no row here — the web server
+# loads it from `exports["./client"]` because package.json declares
+# `dsh.client.platform: "web"`.
+#
+# Deliberately NO override of the shipped `connection` or `webserver` rows:
+# deployment values (the tunnel authority, a LAN bind, the advertised public
+# URL) are written on demand from the panel through `ctx.configEditor`, which
+# persists them into the user's own layer and reconciles them through the
+# normal Loader path. Hard-coding them here would duplicate the plugin config
+# and would fight whatever the user passes on the command line.
+#
+# Optional fields (all under `config`):
+#   tunnelHost      authority the tunnel serves, e.g. 'dsh.example.com'
+#   publicUrl       advertised root, e.g. 'https://dsh.example.com'
+#   lanHost         concrete local interface literal for a LAN entry,
+#                   e.g. '10.0.161.47' (never a wildcard address)
+#   cloudflared     { command, args } to manage as a child process, e.g.
+#                   { command: 'cloudflared', args: ['tunnel', 'run', 'dsh-mobile'] }
+#   narrowEnhance   apply the phone layout tweaks on a narrow viewport (default true)
+#   deviceRetentionDays  drop device rows unseen for this long (default 180)
+
+- insert:
+    - id: mobile-console
+      name: dsh-mobile-console
