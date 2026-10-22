@@ -241,7 +241,9 @@ function fakeRequest({ url = '/', method = 'GET', headers = {} } = {}) {
   return {
     method,
     url,
-    headers: { host: 'dsh.example.com', ...headers },
+    // The page's own script posts JSON (`headers: { 'content-type': 'application/json' }`),
+    // and the host requires it on the public doors; the double has to match.
+    headers: { host: 'dsh.example.com', ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), ...headers },
     socket: { remoteAddress: '203.0.113.9' },
     pipe(target) {
       target.end();

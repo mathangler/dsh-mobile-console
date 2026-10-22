@@ -42,6 +42,7 @@ import {
   patchRowConfig,
   publicDeviceRow,
   publicKeyRow,
+  reachabilityOf,
   readRowConfigList,
   resolveLinkBase,
   storablePayload,
@@ -292,7 +293,7 @@ test('resolves link authorities in order, and says how far they reach', () => {
     scheme: 'http',
     reachable: 'loopback-only',
   });
-  assert.equal(resolveLinkBase({ publicUrl: 'http://10.0.161.47:3080' }).reachable, 'lan');
+  assert.equal(resolveLinkBase({ publicUrl: 'http://10.0.161.47:3080', tunnelRunning: true }).reachable, 'lan');
   // A scheme-less advertised name is a public one, so it gets https.
   assert.deepEqual(resolveLinkBase({ publicUrl: 'dsh.example.com', tunnelRunning: true }), {
     base: 'dsh.example.com',
@@ -344,20 +345,35 @@ test('resolves link authorities in order, and says how far they reach', () => {
   assert.equal(resolveLinkBase({ bindHost: '10.0.161.47', port: 0 }).base, '10.0.161.47:3080');
 });
 
-test('only claims a public link while something actually serves it', () => {
+test('names the authority it can serve, and says how far that authority reaches', () => {
   const tunnel = 'dsh.example.com';
-  // The base is still the right link to hand out...
-  assert.equal(resolveLinkBase({ tunnelHost: tunnel, tunnelRunning: false }).base, tunnel);
-  // ...but a stopped tunnel is not a reachable public link.
-  assert.equal(resolveLinkBase({ tunnelHost: tunnel, tunnelRunning: false }).reachable, 'loopback-only');
-  assert.equal(resolveLinkBase({ tunnelHost: tunnel, tunnelRunning: false, bindHost: '10.0.161.47' }).reachable, 'lan');
-  assert.equal(resolveLinkBase({ tunnelHost: tunnel, tunnelRunning: true }).reachable, 'public');
-  assert.equal(resolveLinkBase({ tunnelHost: tunnel }).reachable, 'loopback-only', 'no running tunnel, no public claim');
-  assert.equal(resolveLinkBase({ publicUrl: 'https://dsh.example.com/', tunnelRunning: false }).reachable, 'loopback-only');
-  assert.equal(resolveLinkBase({ publicUrl: 'https://dsh.example.com/', tunnelRunning: false, bindHost: '192.168.31.186' }).reachable, 'lan');
-  assert.equal(resolveLinkBase({ publicUrl: 'https://dsh.example.com/', tunnelRunning: true }).reachable, 'public');
-  // A LAN base is not gated: nothing about it depends on the tunnel.
-  assert.equal(resolveLinkBase({ bindHost: '10.0.161.47', port: 3080, tunnelRunning: false }).reachable, 'lan');
+  const lanBind = '10.0.161.47';
+  // The verdict has to describe the URL that came with it: a link the plugin
+  // calls `loopback-only` while its own QR encodes a tunnel host is a link the
+  // panel warns about for no reason — or stays quiet about when it matters.
+  const agrees = (input, base, reachable) => {
+    const resolved = resolveLinkBase(input);
+    assert.equal(resolved.base, base, `base for ${JSON.stringify(input)}`);
+    assert.equal(resolved.reachable, reachable, `verdict for ${JSON.stringify(input)}`);
+    assert.equal(reachabilityOf(resolved.base), resolved.reachable, 'the verdict matches the authority named');
+    return resolved;
+  };
+
+  // A configured public base is the link only while something serves it.
+  agrees({ tunnelHost: tunnel, tunnelRunning: true }, tunnel, 'public');
+  agrees({ publicUrl: `https://${tunnel}/`, tunnelRunning: true }, tunnel, 'public');
+  // Down, it is not the link at all: the URL names what can actually answer.
+  agrees({ tunnelHost: tunnel, tunnelRunning: false }, '127.0.0.1:3080', 'loopback-only');
+  agrees({ publicUrl: `https://${tunnel}/`, tunnelRunning: false }, '127.0.0.1:3080', 'loopback-only');
+  agrees({ tunnelHost: tunnel, tunnelRunning: false, bindHost: lanBind }, `${lanBind}:3080`, 'lan');
+  agrees({ publicUrl: `https://${tunnel}/`, tunnelRunning: false, bindHost: '192.168.31.186' }, '192.168.31.186:3080', 'lan');
+  agrees({ tunnelHost: tunnel }, '127.0.0.1:3080', 'loopback-only');
+  // The request's own authority is never gated: being answered on it is proof.
+  agrees({ tunnelHost: tunnel, tunnelRunning: false, requestHost: lanBind, requestScheme: 'http' }, lanBind, 'lan');
+  agrees({ tunnelHost: tunnel, tunnelRunning: false, requestHost: tunnel, requestScheme: 'https' }, tunnel, 'public');
+  // And LAN mode keeps its own answer with no tunnel in the picture.
+  agrees({ bindHost: lanBind, port: 3080, tunnelRunning: false }, `${lanBind}:3080`, 'lan');
+  agrees({ bindHost: '192.168.31.186', port: 3199, requestHost: '127.0.0.1:3199', tunnelRunning: false }, '192.168.31.186:3199', 'lan');
 });
 
 test('dials the listener it is actually bound to', () => {
@@ -399,13 +415,25 @@ test('gives every record a fresh id that is not part of a fingerprint', () => {
 // paths that answer without proxying the platform index are exercised here.
 
 /** A host context with just enough of the seam for the endpoint map. */
-function hostCtx({ records = new Map(), secrets = new Map(), config, editor, connection, port = 3080, documentPath } = {}) {
+// The listener port is deliberately a *closed* one: a test that reaches the
+// index-forward path must fail closed rather than dial whatever is running on
+// the developer's machine. Tests that care about the reported port set it.
+function hostCtx({ records = new Map(), secrets = new Map(), config, editor, connection, port = 9, documentPath } = {}) {
   const routes = { prefix: [], exact: new Map() };
+  // Updates to one key are serialized, like the real credential store's atomic
+  // update: a double that let two `modifyRecord` callbacks read the same value
+  // would make a compare-and-swap look unnecessary.
+  const chains = new Map();
   const credentials = {
     readRecord: async (key) => records.get(key),
     modifyRecord: async (key, mutate) => {
-      const next = await mutate(records.get(key));
-      if (next !== undefined) records.set(key, next);
+      const previous = chains.get(key) ?? Promise.resolve();
+      const next = previous.then(async () => {
+        const value = await mutate(records.get(key));
+        if (value !== undefined) records.set(key, value);
+        return value;
+      });
+      chains.set(key, next.then(() => undefined, () => undefined));
       return next;
     },
     deleteRecord: async (key) => records.delete(key),
@@ -446,13 +474,31 @@ function hostCtx({ records = new Map(), secrets = new Map(), config, editor, con
               ? (connection ?? {
                   // Enough of the fence for both callers. Its trust probe is a
                   // synthetic request with no socket and is answered "trusted"; a
-                  // real request to a plugin endpoint passes; a real request to the
-                  // root gate is refused, so the gate's fall-through never proxies
-                  // the platform index from inside a test.
+                  // real request to a plugin endpoint passes; a real root request
+                  // is turned away like any unauthenticated browser (401), and an
+                  // authority the fence actually refuses is 403 — which is the
+                  // distinction the gate's redirect refusal turns on.
                   requestRejection: (request) => {
                     const url = String(request?.url ?? '/');
                     if (url.startsWith(CHANNEL)) return undefined;
-                    return request?.socket === undefined ? undefined : 403;
+                    if (request?.socket === undefined) return undefined;
+                    const host = String(request?.headers?.host ?? '');
+                    if (host === '' || host.startsWith('evil.')) return 403;
+                    return 401;
+                  },
+                  // The platform's own exchange, as the real connection service
+                  // offers it: a launch token becomes a cookie, server-side.
+                  authenticatedUrl: (base) => `${base}?token=launch-token`,
+                  authorizeIndex: (request, response) => {
+                    const url = new URL(String(request?.url ?? '/'), 'http://dsh.invalid');
+                    if (request?.method === 'GET' && url.pathname === '/' && url.searchParams.get('token') === 'launch-token') {
+                      response.writeHead(303, { location: './', 'set-cookie': 'dsh-session=ok; Path=/; HttpOnly' });
+                      response.end();
+                      return false;
+                    }
+                    response.writeHead(401, {});
+                    response.end();
+                    return false;
                   },
                 })
               : undefined,
@@ -613,7 +659,7 @@ test('the access-key door mints a single-use link and burns it at the gate', asy
   const second = fakeResponse();
   await root(fakeRequest(undefined, { url: `/?token=${token}` }), second);
   assert.notEqual(second.statusCode, 303, 'it cannot be replayed');
-  assert.equal(second.statusCode, 403, 'a spent link falls through to the fence’s own answer');
+  assert.equal(second.headers['set-cookie'], undefined, 'a spent link mints nothing on the way back');
 });
 
 test('the page-close beacon is idempotent and never throws', async () => {
@@ -744,11 +790,15 @@ test('exchanges a launch token for the platform cookie, keeping ours', async () 
   assert.equal(second.statusCode, 303);
   assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 1, 'a known device is not re-recorded');
 
-  // A launch token the platform refuses is the platform's own 401, and a
-  // cookie-less stranger stays a stranger.
+  // A launch token the platform refuses is not a key: the visit falls through to
+  // the ordinary answer, and no credential is attached to it. (Live, that
+  // ordinary answer is the platform's own 401; here the index dial is closed on
+  // purpose, so what is asserted is the invariant — nothing of ours rides along.)
   const refused = fakeResponse();
   await root(fakeRequest(undefined, { method: 'GET', url: '/?token=stale-token' }), refused);
-  assert.equal(refused.statusCode, 401);
+  assert.equal(refused.headers['set-cookie'], undefined, 'a refused token mints nothing');
+  assert.ok(!String(refused.headers['content-type'] ?? '').includes('text/html'), 'and never our page');
+  assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 1, 'still only the one real row');
 
   // The platform's verdict comes first: an accepted caller is forwarded, never
   // bounced through a fresh launch token — the loop that would otherwise never
@@ -794,11 +844,12 @@ test('bootstraps a loopback launch-token visit through the platform authorizer',
   assert.ok(cookies.some((cookie) => cookie.startsWith('mc-device=')), 'and our device credential too');
   assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices[0].source, 'entry-link');
 
-  // A stale token is still the platform's own answer, and a plain loopback visit
-  // (no token at all) is untouched: it is proxied as before.
+  // A stale token is not a key and not an oracle: the visit falls through to the
+  // ordinary answer, and nothing is minted for it.
   const stale = fakeResponse();
   await root(fakeRequest(undefined, { ...local, url: '/?token=stale' }), stale);
-  assert.equal(stale.statusCode, 401);
+  assert.equal(stale.headers['set-cookie'], undefined, 'a stale token buys no credential');
+  assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 1, 'still the one row from the real bootstrap');
   const plain = hostCtx({ connection: { requestRejection: () => undefined }, port: 9 });
   const forwarded = fakeResponse();
   await plain.routes.exact.get('/')(fakeRequest(undefined, { url: '/', headers: { host: '127.0.0.1:3080' }, remoteAddress: '127.0.0.1', method: 'GET' }), forwarded);
@@ -833,6 +884,393 @@ test('serves the pairing door with or without a password, and stays quiet otherw
   assert.equal((await route(ctx, `${CHANNEL}/unlock/pair`, { code: second.value.code }, { method: 'POST' })).ok, true, 'and the pairing door keeps working');
 });
 
+test('refuses to mint a credential for a token the platform has not accepted', async () => {
+  // The bypass this locks shut: `?token=<anything>` used to mint a valid 30-day
+  // device credential *before* the platform judged the token, and the platform's
+  // 401 was then forwarded with our Set-Cookie still attached — so a stranger
+  // who asked for `?token=1` held a device credential, and that credential was
+  // worth a platform cookie through the reentry path.
+  const shapes = ['1', 'A'.repeat(200), 'x'.repeat(43), ' ', '%20', 'drt_' + 'y'.repeat(43), 'undefined', 'null'];
+  for (const shape of shapes) {
+    const ctx = hostCtx();
+    const res = fakeResponse();
+    await ctx.routes.exact.get('/')(
+      fakeRequest(undefined, {
+        method: 'GET',
+        url: `/?token=${encodeURIComponent(shape)}`,
+        headers: { host: 'dsh.example.com' },
+        remoteAddress: '203.0.113.9',
+      }),
+      res,
+    );
+    const label = JSON.stringify(shape.slice(0, 12));
+    const cookies = [].concat(res.headers['set-cookie'] ?? []);
+    assert.equal(cookies.length, 0, `${label}: nothing was minted`);
+    assert.ok(!cookies.some((value) => String(value).startsWith('mc-device=')), `${label}: no device credential`);
+    assert.ok(!cookies.some((value) => String(value).startsWith('dsh-session=')), `${label}: no platform cookie`);
+    assert.ok(!String(res.body ?? '').includes('__DSH_BOOT__'), `${label}: not an app response`);
+    assert.equal(
+      (ctx.records.get(DEVICES_V2_RECORD_KEY)?.payload?.devices ?? []).length,
+      0,
+      `${label}: no row was created either`,
+    );
+  }
+
+  // An empty token is simply no token: it behaves like a bare `GET /`.
+  const bare = hostCtx();
+  const withEmpty = fakeResponse();
+  await bare.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/?token=', headers: { host: 'dsh.example.com' }, remoteAddress: '203.0.113.9' }),
+    withEmpty,
+  );
+  const withoutAny = fakeResponse();
+  await bare.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: { host: 'dsh.example.com' }, remoteAddress: '203.0.113.9' }),
+    withoutAny,
+  );
+  assert.equal(withEmpty.statusCode, withoutAny.statusCode, '?token= and a bare GET / answer the same');
+  assert.deepEqual(withEmpty.headers, withoutAny.headers, 'with the same headers, and no cookie either way');
+
+  // A refusal from the platform is forwarded as-is: no plugin cookie rides along.
+  const refusing = hostCtx({
+    connection: {
+      requestRejection: () => 401,
+      authenticatedUrl: (base) => `${base}?token=launch-token`,
+      authorizeIndex: (request, response) => {
+        response.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' });
+        response.end('nope');
+        return false;
+      },
+    },
+  });
+  const refused = fakeResponse();
+  await refusing.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/?token=launch-token', headers: { host: 'dsh.example.com' }, remoteAddress: '203.0.113.9' }),
+    refused,
+  );
+  assert.equal(refused.headers['set-cookie'], undefined, 'a refused exchange carries no cookie of ours');
+  assert.ok(!String(refused.headers['content-type'] ?? '').includes('text/html'), 'and never our page');
+  assert.equal((refusing.records.get(DEVICES_V2_RECORD_KEY)?.payload?.devices ?? []).length, 0, 'and nothing was minted for it');
+
+  // The platform's own launch token still pairs, in one answer.
+  const pairing = hostCtx();
+  const boot = fakeResponse();
+  await pairing.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/?token=launch-token', headers: { host: 'dsh.example.com' }, remoteAddress: '203.0.113.9' }),
+    boot,
+  );
+  const bootCookies = [].concat(boot.headers['set-cookie'] ?? []).map(String);
+  assert.equal(boot.statusCode, 303, 'the printed URL is answered by the platform exchange');
+  assert.ok(bootCookies.some((value) => value.startsWith('dsh-session=')), 'with its cookie');
+  assert.ok(bootCookies.some((value) => value.startsWith('mc-device=')), 'and ours, in the same answer');
+  assert.equal(pairing.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 1, 'one row, for a proven token');
+});
+
+test('keeps both doors quiet while no password is armed', async () => {
+  // The two doors have to agree: with nothing armed, `/` is the platform's own
+  // 401 and `/remote-access/unlock` says nothing exists. A page on one and a 404
+  // on the other announces the plugin from the door nobody is watching.
+  const ctx = hostCtx();
+  const remote = { host: 'dsh.example.com' };
+  const gate = async (url) => {
+    const res = fakeResponse();
+    await ctx.routes.exact.get('/')(
+      fakeRequest(undefined, { method: 'GET', url, headers: remote, remoteAddress: '203.0.113.9' }),
+      res,
+    );
+    return res;
+  };
+
+  for (const url of ['/', '/?token=1', '/?token=']) {
+    const res = await gate(url);
+    // Live this is the platform's own 401; the index dial is closed here, so
+    // what is asserted is the silence: no page of ours, no credential, and no
+    // app — the plugin never announces the recovery door it is not serving.
+    assert.ok(!String(res.headers['content-type'] ?? '').includes('text/html'), `${url}: not our HTML`);
+    assert.ok(!String(res.body ?? '').includes('__DSH_BOOT__'), `${url}: no app`);
+    assert.ok(!String(res.body ?? '').includes('Remote access recovery'), `${url}: no recovery page`);
+    assert.equal(res.headers['set-cookie'], undefined, `${url}: and no credential`);
+  }
+
+  // A refused redemption is the same answer, not a page.
+  const refused = await gate(`/?token=drt_${'z'.repeat(43)}`);
+  assert.ok(!String(refused.body ?? '').includes('Remote access recovery'), 'a refused link serves no page');
+  assert.equal(refused.headers['set-cookie'], undefined);
+
+  // The other door agrees.
+  const page = await route(ctx, `${CHANNEL}/unlock`, {}, { method: 'GET' });
+  assert.equal(page.status, 404, 'the page route does not exist while nothing is armed');
+
+  // With a password armed the page *is* the answer, so the silence above is
+  // about the armed state and not about the branch being dead.
+  const armedCtx = hostCtx({ connection: { requestRejection: () => 401 } });
+  armedCtx.records.set('dsh-remote-access/recovery', {
+    kind: 'grant',
+    payload: { version: 1, key: 'k', salt: 's', secret: 'secret', iterations: 1000 },
+  });
+  const armed = fakeResponse();
+  await armedCtx.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: remote, remoteAddress: '203.0.113.9' }),
+    armed,
+  );
+  assert.equal(armed.statusCode, 200, 'armed: the page is served');
+  assert.ok(String(armed.headers['content-type']).includes('text/html'));
+});
+
+test('hands out URLs whose authority matches the reachability it reports', async () => {
+  // Every QR-bearing answer, checked against the verdict in the same response.
+  const ctx = hostCtx({ documentPath: undefined });
+  const agrees = (label, value) => {
+    assert.equal(typeof value.url, 'string', `${label} has a URL`);
+    const authority = new URL(value.url).host;
+    assert.equal(reachabilityOf(authority), value.reachable, `${label}: ${authority} vs ${value.reachable}`);
+    return value;
+  };
+
+  const code = await endpoint(ctx, 'pair-code', { days: null });
+  agrees('pair-code', code.value);
+  const key = await endpoint(ctx, 'key-create', { name: 'Phone' });
+  agrees('/remote-access/token', (await endpoint(ctx, 'token', { key: key.value.key })).value);
+  const devices = await endpoint(ctx, 'device-list', {});
+  agrees('device-link', (await endpoint(ctx, 'device-link', { id: devices.value.devices[0].id })).value);
+  agrees('/unlock/pair', (await route(ctx, `${CHANNEL}/unlock/pair`, { code: code.value.code }, { method: 'POST' })).value);
+  agrees('renew-session', (await endpoint(ctx, 'renew-session', {})).value);
+
+  // The same verdict the state reports, so the panel's warning and the QR cannot
+  // disagree about the same link.
+  const state = await endpoint(ctx, 'state', {});
+  assert.equal(state.value.linksReachable, reachabilityOf(new URL(code.value.url).host));
+});
+
+test('lets exactly one of many concurrent pairing redemptions win', async () => {
+  const ctx = hostCtx();
+  const minted = await endpoint(ctx, 'pair-code', { days: 30 });
+  const code = minted.value.code;
+
+  // Twelve at once, the way a script would. A read/splice/write cycle lets every
+  // one of them read the same rows and win; the compare-and-swap lets one.
+  const attempts = await Promise.all(
+    Array.from({ length: 12 }, () => route(ctx, `${CHANNEL}/unlock/pair`, { code }, { method: 'POST' })),
+  );
+  const won = attempts.filter((attempt) => attempt.status === 200 && attempt.ok === true);
+  const lost = attempts.filter((attempt) => attempt.status === 200 && attempt.ok === false);
+  assert.equal(won.length, 1, `exactly one winner, got ${won.length}`);
+  assert.equal(lost.length, 11, 'and eleven refusals');
+  for (const attempt of lost) assert.equal(attempt.error.code, 'remote-access/pair-denied');
+
+  // One code, one device row — not twelve.
+  const devices = (await endpoint(ctx, 'device-list', {})).value.devices;
+  assert.equal(devices.length, 1, 'one device was authorized');
+  assert.equal(devices[0].source, 'device-code');
+  const codes = ctx.records.get('dsh-remote-access/pair-codes')?.payload?.codes ?? [];
+  assert.equal(codes.length, 0, 'and the code is gone');
+});
+
+test('refuses a cross-site POST at every public door', async () => {
+  // The public doors skip the platform's browser check by design, so they carry
+  // its cross-site half themselves. Each case is a real cross-site shape:
+  // `sec-fetch-site`, a foreign `Origin`, and `Origin: null`.
+  const crossSite = [
+    { 'sec-fetch-site': 'cross-site' },
+    { origin: 'http://evil.example' },
+    { origin: 'null' },
+    { origin: 'http://dsh.example.com.evil.example' },
+  ];
+  const ctx = hostCtx();
+  const code = (await endpoint(ctx, 'pair-code', { days: 30 })).value.code;
+  const key = (await endpoint(ctx, 'key-create', { name: 'Phone' })).value.key;
+
+  for (const headers of crossSite) {
+    const pair = await route(ctx, `${CHANNEL}/unlock/pair`, { code }, { method: 'POST', headers });
+    assert.equal(pair.status, 403, `pair is refused for ${JSON.stringify(headers)}`);
+    assert.equal(pair.res.headers['set-cookie'], undefined, 'and sets no cookie');
+    const token = await route(ctx, `${CHANNEL}/token`, { key }, { method: 'POST', headers });
+    assert.equal(token.status, 403, `the key door is refused for ${JSON.stringify(headers)}`);
+    const close = await route(ctx, `${CHANNEL}/page-close`, { token: newTempToken() }, { method: 'POST', headers });
+    assert.equal(close.status, 403, `the beacon is refused for ${JSON.stringify(headers)}`);
+  }
+  assert.equal((await endpoint(ctx, 'device-list', {})).value.devices.length, 0, 'nothing was authorized');
+  assert.equal(ctx.records.get('dsh-remote-access/pair-codes').payload.codes.length, 1, 'and no code was burned');
+
+  // Same-origin, and the desktop workflow with no Origin at all, still work.
+  const sameOrigin = await route(ctx, `${CHANNEL}/unlock/pair`, { code }, { method: 'POST', headers: { origin: 'http://dsh.example.com', 'sec-fetch-site': 'same-origin' } });
+  assert.equal(sameOrigin.ok, true, JSON.stringify(sameOrigin.error));
+  assert.equal((await endpoint(ctx, 'device-list', {})).value.devices.length, 1, 'the same-origin pairing went through');
+
+  // And the body has to be the JSON the API speaks.
+  const again = (await endpoint(ctx, 'pair-code', { days: 30 })).value.code;
+  const wrongType = await route(ctx, `${CHANNEL}/unlock/pair`, { code: again }, { method: 'POST', headers: { 'content-type': 'text/plain' } });
+  assert.equal(wrongType.status, 415, 'a form-shaped body is refused');
+  const noType = await route(ctx, `${CHANNEL}/unlock/pair`, { code: again }, { method: 'POST', headers: { 'content-type': '' } });
+  assert.equal(noType.status, 415, 'and so is a body with no type at all');
+  assert.equal((await endpoint(ctx, 'device-list', {})).value.devices.length, 1, 'neither one authorized anything');
+});
+
+test('counts a client by its socket, not by a header it can invent', async () => {
+  const ctx = hostCtx();
+  // Twelve wrong codes, a fresh forwarding header on each, one socket: a
+  // spoofable key turned the per-client budget into no budget.
+  let throttled = 0;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const answer = await route(
+      ctx,
+      `${CHANNEL}/unlock/pair`,
+      { code: 'ABCDEFGH' },
+      { method: 'POST', headers: { 'x-forwarded-for': `203.0.113.${attempt + 1}` }, remoteAddress: '198.51.100.7' },
+    );
+    if (answer.status === 429) throttled += 1;
+  }
+  assert.ok(throttled > 0, 'the budget bites even though every request claimed a new address');
+  assert.equal(throttled, 7, 'five attempts allowed, seven refused');
+
+  // From the loopback proxy the header *is* the client, so each address gets its
+  // own budget — that is what cloudflared looks like.
+  const behindProxy = hostCtx();
+  const statuses = [];
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const answer = await route(
+      behindProxy,
+      `${CHANNEL}/unlock/pair`,
+      { code: 'ABCDEFGH' },
+      { method: 'POST', headers: { 'cf-connecting-ip': `203.0.113.${attempt + 1}` }, remoteAddress: '127.0.0.1' },
+    );
+    statuses.push(answer.status);
+  }
+  assert.deepEqual(statuses, [200, 200, 200, 200], 'four distinct edge clients are four budgets');
+});
+
+test('does not let failed proofs lock the owner out of the door', async () => {
+  const ctx = hostCtx();
+  ctx.records.set('dsh-remote-access/recovery', {
+    kind: 'grant',
+    payload: { version: 1, key: 'k', salt: 'c2FsdA==', secret: 'sec', iterations: 1000 },
+  });
+  // One attacker burns its own budget...
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await route(ctx, `${CHANNEL}/unlock/verify`, { nonce: 'nope', proof: 'nope' }, { method: 'POST', remoteAddress: '198.51.100.9' });
+  }
+  const attacker = await route(ctx, `${CHANNEL}/unlock/verify`, { nonce: 'nope', proof: 'nope' }, { method: 'POST', remoteAddress: '198.51.100.9' });
+  assert.equal(attacker.status, 429, 'the attacker is throttled');
+
+  // ...and the owner, from another address, still gets a challenge: the global
+  // budget is a backstop, not five failures away from a lockout.
+  const owner = await route(ctx, `${CHANNEL}/unlock/challenge`, {}, { method: 'POST', remoteAddress: '203.0.113.50' });
+  assert.equal(owner.status, 200, 'the owner is not locked out by someone else’s failures');
+  assert.equal(owner.ok, true, JSON.stringify(owner.error));
+});
+
+test('serves the pairing page only for a code that could be real', async () => {
+  // With no password armed, `?code=` used to be enough to make the recovery page
+  // appear — and that page states whether a password is set.
+  const ctx = hostCtx();
+  const valid = (await endpoint(ctx, 'pair-code', { days: 30 })).value.code;
+  const shapes = ['', ' ', 'abc', 'ABCDEFG', 'ABCDEFGHI', 'ABCDEFG!', 'ABCDEFG0', 'ABCDEFGL', 'ABCDEFGO'];
+  for (const shape of shapes) {
+    const page = await route(ctx, `${CHANNEL}/unlock?code=${encodeURIComponent(shape)}`, {}, { method: 'GET' });
+    assert.equal(page.status, 404, `code ${JSON.stringify(shape)} is not a page`);
+  }
+  // 'ABCDEFGH' is in the alphabet and the right length, so it is a *shape* the
+  // page may serve even though no such code was minted: the page is the code
+  // door, and the redemption itself is what rejects it.
+  const shaped = await route(ctx, `${CHANNEL}/unlock?code=ABCDEFGH`, {}, { method: 'GET' });
+  assert.equal(shaped.status, 200, 'a well-formed code opens the page');
+  const real = await route(ctx, `${CHANNEL}/unlock?code=${encodeURIComponent(valid)}`, {}, { method: 'GET' });
+  assert.equal(real.status, 200, 'a minted code still opens its page');
+  assert.match(String(real.res.body), /'\/unlock\/pair'/, 'and the page can redeem it');
+});
+
+test('decides Secure from configuration, not from a header a caller sets', async () => {
+  // `x-forwarded-proto` decided whether the plugin's cookies carried `Secure`,
+  // which let any caller choose the transport attributes of a credential.
+  const plain = hostCtx();
+  const plainCode = (await endpoint(plain, 'pair-code', { days: 30 })).value.code;
+  const claimed = await route(plain, `${CHANNEL}/unlock/pair`, { code: plainCode }, { method: 'POST', headers: { 'x-forwarded-proto': 'https' } });
+  assert.equal(claimed.ok, true, JSON.stringify(claimed.error));
+  const cookie = [].concat(claimed.res.headers['set-cookie'] ?? []).join('; ');
+  assert.ok(!cookie.includes('Secure'), 'a header claim does not add Secure');
+
+  // A configured public URL is what says https, and it is read from the config.
+  const advertised = hostCtx({ config: { publicUrl: 'https://dsh.example.com/' } });
+  const advertisedCode = (await endpoint(advertised, 'pair-code', { days: 30 })).value.code;
+  const secure = await route(advertised, `${CHANNEL}/unlock/pair`, { code: advertisedCode }, { method: 'POST' });
+  assert.equal(secure.ok, true, JSON.stringify(secure.error));
+  assert.ok([].concat(secure.res.headers['set-cookie'] ?? []).join('; ').includes('Secure'), 'the configured https base does');
+});
+
+test('a flood of entry links cannot evict a real device, and is rate limited', async () => {
+  const ctx = hostCtx();
+  // Three real paired devices, as a household would have.
+  const real = [];
+  for (let index = 0; index < 3; index += 1) {
+    const key = await endpoint(ctx, 'key-create', { name: `Phone ${index}` });
+    await endpoint(ctx, 'token', { key: key.value.key });
+  }
+  for (const row of ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices) real.push(row.id);
+  assert.equal(real.length, 3);
+
+  // Now a flood of launch-token visits — the shape that used to add fifty rows
+  // and push every real device out of the capped list.
+  const gate = ctx.routes.exact.get('/');
+  const mintedCookies = [];
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const res = fakeResponse();
+    await gate(
+      fakeRequest(undefined, {
+        method: 'GET',
+        url: '/?token=launch-token',
+        headers: { host: 'dsh.example.com' },
+        remoteAddress: '198.51.100.44',
+      }),
+      res,
+    );
+    assert.equal(res.statusCode, 303, 'the platform exchange still answers');
+    const cookies = [].concat(res.headers['set-cookie'] ?? []).map(String);
+    assert.ok(cookies.some((value) => value.startsWith('dsh-session=')), 'with the platform cookie');
+    if (cookies.some((value) => value.startsWith('mc-device='))) mintedCookies.push(attempt);
+  }
+
+  const rows = ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices;
+  for (const id of real) {
+    assert.ok(rows.some((row) => row.id === id), `the real device ${id} is still authorized`);
+  }
+  const entryLinks = rows.filter((row) => row.source === 'entry-link');
+  assert.ok(entryLinks.length <= 3, `entry links are capped, got ${entryLinks.length}`);
+  // Five mints per client per quarter hour: the flood gets no more than that,
+  // and it can never reach MAX_DEVICES.
+  assert.equal(mintedCookies.length, 5, 'the mint budget is five per client');
+  assert.equal(mintedCookies[0], 0, 'the first visit mints');
+  assert.equal(mintedCookies[4], 4, 'the fifth mints');
+  assert.equal(rows.length, 3 + entryLinks.length, 'and nothing else was added');
+});
+
+test('refuses a token visit, and a redirect, from an authority the fence rejects', async () => {
+  // F7: the gate used to accept a device credential even when the fence said
+  // 403, and then build a redirect from that Host — which handed the refused
+  // authority a URL carrying the process launch token.
+  const ctx = hostCtx();
+  const gate = ctx.routes.exact.get('/');
+  const key = await endpoint(ctx, 'key-create', { name: 'Phone' });
+  const linked = await endpoint(ctx, 'token', { key: key.value.key });
+  const token = new URL(linked.value.url).searchParams.get('token');
+  const device = ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices[0];
+  const cookie = { cookie: `mc-device=${device.hash}` };
+
+  for (const attempt of [
+    { url: '/', headers: { host: 'evil.example', ...cookie } },
+    { url: '/?token=launch-token', headers: { host: 'evil.example' } },
+    { url: `/?token=${token}`, headers: { host: 'evil.example' } },
+    { url: '/', headers: { host: 'evil.example', cookie: 'mc-unlock=whatever' } },
+  ]) {
+    const res = fakeResponse();
+    await gate(fakeRequest(undefined, { method: 'GET', remoteAddress: '203.0.113.9', ...attempt }), res);
+    assert.equal(res.statusCode, 403, `${attempt.url} on a refused Host is refused`);
+    assert.equal(res.headers.location, undefined, 'and no redirect is built for it');
+    assert.equal(res.headers['set-cookie'], undefined, 'and nothing is minted');
+  }
+  // No row was created for a refused authority.
+  assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 1, 'the only row is the one the panel minted');
+});
+
 test('mints a one-time link for an existing device without touching it', async () => {
   const ctx = hostCtx();
   const created = await endpoint(ctx, 'key-create', { name: 'Phone' });
@@ -844,35 +1282,93 @@ test('mints a one-time link for an existing device without touching it', async (
 
   const linked = await endpoint(ctx, 'device-link', { id: source.id });
   assert.equal(linked.ok, true, JSON.stringify(linked.error));
-  assert.equal(linked.value.id, source.id);
+  // The answer identifies the LINK row — the one the panel can see and revoke —
+  // and says which device it was minted for.
+  assert.notEqual(linked.value.id, source.id, 'the link row, not the source row');
+  assert.equal(linked.value.parentId, source.id);
   assert.ok(isTempToken(new URL(linked.value.url).searchParams.get('token')), 'the link carries a temp token');
   assert.ok(Number.isInteger(linked.value.qr?.size));
   assert.ok(Math.abs(linked.value.expiresAt - Date.now() - TEMP_TOKEN_TTL_MS) < 5000, 'fifteen minutes, as promised');
 
   const rows = ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices;
   assert.equal(rows.length, 2, 'a new row, not a rewritten one');
-  const added = rows.find((row) => row.id !== source.id);
+  const added = rows.find((row) => row.id === linked.value.id);
+  assert.ok(added !== undefined, 'the returned id is a row that exists');
+  assert.equal(added.parentId, source.id, 'and it remembers its device');
   assert.equal(added.temporary, true);
   assert.equal(added.source, source.source, 'the source is copied');
   assert.match(added.name, /· 链接$/);
   assert.notEqual(added.hash, source.hash, 'and the device keeps its own credential');
   // The source row is byte-for-byte what it was.
   assert.equal(JSON.stringify(rows.find((row) => row.id === source.id)), snapshot);
+  // The panel can revoke exactly what it was handed.
+  assert.equal((await endpoint(ctx, 'device-revoke', { id: linked.value.id })).value.revoked, true);
+  assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 1, 'the link row is the one that went away');
+  assert.equal(JSON.stringify(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices[0]), snapshot, 'and the device survived');
 
   // Unknown id: a dedicated refusal the panel can branch on, and nothing minted.
   const missing = await endpoint(ctx, 'device-link', { id: 'nope' });
   assert.equal(missing.ok, false);
   assert.equal(missing.error.code, 'remote-access/device-not-found');
   assert.match(missing.error.message, /no authorized device with id "nope"/);
-  assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 2, 'a failed link adds no row');
+  assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 1, 'a failed link adds no row');
 
-  // And it is rate limited like the other mint operations.
+  // And it is rate limited like the other mint operations: the mint above was
+  // the first of five, so four more are allowed and the sixth is refused.
   for (let attempt = 0; attempt < 4; attempt += 1) {
     assert.equal((await endpoint(ctx, 'device-link', { id: source.id })).ok, true, `mint ${attempt + 2}`);
   }
   const throttled = await endpoint(ctx, 'device-link', { id: source.id });
   assert.equal(throttled.ok, false);
   assert.match(throttled.error.message, /too many links/);
+});
+
+test('a device link dies with the device it was minted for', async () => {
+  const visit = async (ctx, token) => {
+    const res = fakeResponse();
+    await ctx.routes.exact.get('/')(
+      fakeRequest(undefined, { method: 'GET', url: `/?token=${token}`, headers: { host: 'dsh.example.com' }, remoteAddress: '203.0.113.9' }),
+      res,
+    );
+    return res;
+  };
+  const linkFor = async (ctx, deviceId) => {
+    const linked = await endpoint(ctx, 'device-link', { id: deviceId });
+    return { rowId: linked.value.id, token: new URL(linked.value.url).searchParams.get('token') };
+  };
+  const pairedCtx = async () => {
+    const ctx = hostCtx();
+    const key = await endpoint(ctx, 'key-create', { name: 'Phone' });
+    await endpoint(ctx, 'token', { key: key.value.key });
+    const device = (await endpoint(ctx, 'device-list', {})).value.devices[0];
+    return { ctx, device };
+  };
+
+  // A live device: revoking the DEVICE takes its outstanding link with it.
+  const first = await pairedCtx();
+  const revokedLink = await linkFor(first.ctx, first.device.id);
+  assert.ok(revokedLink.rowId !== undefined);
+  assert.equal((await endpoint(first.ctx, 'device-revoke', { id: first.device.id })).value.removed, 2, 'the device and its link both go');
+  assert.equal(first.ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 0, 'nothing is left to redeem');
+  assert.notEqual((await visit(first.ctx, revokedLink.token)).statusCode, 303, 'and the link no longer opens anything');
+
+  // Revoking only the parent (the cascade is tested above; this checks the
+  // redemption-time parent rule on its own).
+  const second = await pairedCtx();
+  const lateLink = await linkFor(second.ctx, second.device.id);
+  assert.equal((await visit(second.ctx, lateLink.token)).statusCode, 303, 'it works while the device is live');
+  const third = await pairedCtx();
+  const orphanLink = await linkFor(third.ctx, third.device.id);
+  third.ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices = third.ctx.records
+    .get(DEVICES_V2_RECORD_KEY)
+    .payload.devices.filter((row) => row.id !== third.device.id);
+  assert.notEqual((await visit(third.ctx, orphanLink.token)).statusCode, 303, 'a link whose parent is gone is refused');
+
+  // A parent that has merely expired is refused too.
+  const fourth = await pairedCtx();
+  const expiringLink = await linkFor(fourth.ctx, fourth.device.id);
+  fourth.ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.find((row) => row.id === fourth.device.id).expiresAt = Date.now() - 1000;
+  assert.notEqual((await visit(fourth.ctx, expiringLink.token)).statusCode, 303, 'a link whose parent expired is refused');
 });
 
 test('refuses a one-time link whose row was revoked, and one that expired', async () => {
@@ -929,6 +1425,87 @@ test('refuses a one-time link whose row was revoked, and one that expired', asyn
   assert.notEqual(gate.statusCode, 303, 'the device cookie door refuses a one-time token');
   assert.equal(smuggled.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 1, 'and the link is still intact for its own door');
   assert.equal((await visit(smuggled, smuggledToken)).statusCode, 303, 'while its real door still works once');
+});
+
+test('never hands the platform launch token back to a client', async () => {
+  const ctx = hostCtx();
+  const secret = 'clean-secret';
+  ctx.records.set('dsh-remote-access/recovery', {
+    kind: 'grant',
+    payload: { version: 1, key: 'k', salt: 's', secret, iterations: 1000 },
+  });
+  const tokenFree = (label, url) => {
+    assert.equal(typeof url, 'string', `${label} has a URL`);
+    assert.equal(new URL(url).searchParams.has('token'), false, `${label} carries no token`);
+    assert.ok(!url.includes('launch-token'), `${label} does not leak the launch token`);
+  };
+
+  // Every URL-bearing answer the plugin gives out.
+  tokenFree('pair-code', (await endpoint(ctx, 'pair-code', { days: null })).value.url);
+  tokenFree('renew-session', (await endpoint(ctx, 'renew-session', {})).value.url);
+  const code = (await endpoint(ctx, 'pair-code', { days: null })).value.code;
+  const pair = await route(ctx, `${CHANNEL}/unlock/pair`, { code }, { method: 'POST' });
+  tokenFree('/unlock/pair', pair.value.url);
+  const phone = {};
+  const pairCookie = [].concat(pair.res.headers['set-cookie'] ?? []);
+  assert.ok(pairCookie.some((value) => String(value).startsWith('mc-device=')));
+  const deviceCookie = String(pairCookie.find((value) => String(value).startsWith('mc-device='))).split(';')[0];
+  phone.cookie = deviceCookie;
+
+  const ticket = signTicket(secret, { v: 1, exp: Date.now() + 60_000, row: 'row-9' });
+
+  // And no redirect the plugin writes may carry one either.
+  const redirects = [];
+  const gate = async (headers, url = '/') => {
+    const res = fakeResponse();
+    await ctx.routes.exact.get('/')(fakeRequest(undefined, { method: 'GET', url, headers: { host: 'dsh.example.com', ...headers }, remoteAddress: '203.0.113.9' }), res);
+    if (res.statusCode === 303) redirects.push({ location: res.headers.location, tokens: res.headers['set-cookie'] ?? [] });
+    return res;
+  };
+  // A device credential, while its pairing row is still the only row.
+  const byDevice = await gate(phone);
+  assert.equal(byDevice.statusCode, 303, 'the device credential re-enters');
+
+  // Then a ticket, for which its row has to exist in the record.
+  ctx.records.set(DEVICES_V2_RECORD_KEY, {
+    kind: 'grant',
+    payload: {
+      version: 2,
+      devices: [
+        {
+          id: 'row-9',
+          name: 'Phone',
+          source: 'device-code',
+          temporary: false,
+          createdAt: new Date().toISOString(),
+          lastUsedAt: null,
+          expiresAt: null,
+          days: null,
+          hash: 'c'.repeat(64),
+        },
+      ],
+    },
+  });
+  const entry = await route(ctx, `${CHANNEL}/unlock/entry`, {}, { method: 'POST', headers: { cookie: `${UNLOCK_COOKIE}=${ticket}` } });
+  tokenFree('/unlock/entry', entry.value.url);
+  const byTicket = await gate({ cookie: `${UNLOCK_COOKIE}=${ticket}` });
+  assert.equal(byTicket.statusCode, 303, 'the ticket re-enters');
+
+  // And a one-time link, from the access-key door.
+  const created = await endpoint(ctx, 'key-create', { name: 'Phone' });
+  const minted = await endpoint(ctx, 'token', { key: created.value.key });
+  const byLink = await gate({}, `/?token=${new URL(minted.value.url).searchParams.get('token')}`);
+  assert.equal(byLink.statusCode, 303, 'the one-time link re-enters');
+
+  assert.equal(redirects.length, 3, 'all three credential kinds redirected');
+  for (const redirect of redirects) {
+    assert.equal(redirect.location, '/', 'the redirect is a bare path, not a tokenized URL');
+    assert.ok(!String(redirect.location).includes('token'), 'and it carries no token parameter');
+    assert.ok(
+      redirect.tokens.some((value) => String(value).startsWith('dsh-session=')),
+      'the session arrives as a cookie from the server-side exchange',
+    );
+  }
 });
 
 test('backs the unlock ticket with its row, so revoking the row revokes it', async () => {
@@ -1027,7 +1604,7 @@ test('renders a page that can redeem a pairing code without a password', () => {
 });
 
 test('reports the mode and switches the bind without starting a tunnel', async () => {
-  const ctx = hostCtx();
+  const ctx = hostCtx({ port: 3080 });
   const status = await endpoint(ctx, 'mode-status', {});
   assert.equal(status.value.mode, 'public', 'the shipped bind is loopback');
   assert.equal(status.value.port, 3080);
@@ -1156,7 +1733,7 @@ test('switches the bind through the profile patch, merging trusted hosts', async
     const rows = webServerRows();
     const connected = rows.find((row) => row.entry.options.id === 'connection');
     connected.entry.options.config = { trustedHosts: ['dsh-win.mathangler.site'] };
-    const wired = hostCtx({ editor: rows, documentPath: path });
+    const wired = hostCtx({ editor: rows, documentPath: path, port: 3080 });
 
     const lan = await endpoint(wired, 'set-mode', { mode: 'lan', host: '10.0.161.47' });
     assert.equal(lan.ok, true, JSON.stringify(lan.error));
