@@ -13,6 +13,7 @@ import {
   classifyRequestOrigin,
   isPrivateAddress,
   sameLan,
+  absentText,
 } from '../lib/index.js';
 import { skillRegistration, SKILL_NAME } from '../lib/skill.js';
 
@@ -206,6 +207,19 @@ test('keeps the last-seen route on a device row', () => {
   assert.equal(second[0].lastVia, 'lan');
   assert.equal(second[0].lastIp, '10.0.161.23');
   assert.equal(second[0].firstSeenAt, t0);
+});
+
+test('treats every browser spelling of absent as not set', () => {
+  // `String(null)` from a stale input draft used to write the literal "null"
+  // into a hostname, producing a config that looked set but could never work.
+  for (const junk of ['null', 'NULL', ' null ', 'undefined', 'nil', '', '   ']) {
+    assert.equal(absentText(junk), undefined, `${JSON.stringify(junk)} means not set`);
+  }
+  assert.equal(absentText(undefined), undefined);
+  assert.equal(absentText(null), undefined);
+  assert.equal(absentText(42), undefined);
+  assert.equal(absentText('dsh-win.example.com'), 'dsh-win.example.com');
+  assert.equal(absentText('  dsh-win.example.com  '), 'dsh-win.example.com');
 });
 
 test('registers the setup skill with all three platforms covered', () => {
