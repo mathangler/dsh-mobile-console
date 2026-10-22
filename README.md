@@ -16,6 +16,10 @@ This plugin is that part, and nothing more:
 | **Trust verdict** | Whether the platform's `/api` fence accepts the tunnel authority, and one button that writes it into the shipped `connection` row |
 | **Local network entry** | The machine's non-loopback addresses, and one button that binds the listener to one of them |
 | **cloudflared child process** | Detect the binary, start/stop a named tunnel as a managed child, and show its recent output |
+| **Cloudflare setup** | An environment checklist (binary, certificate, stored tokens, hostname), a guided browser login that shows the authorization URL, a one-click API-token setup, optional Access creation, and teardown |
+| **Setup skill** | Installing the plugin installs `dsh-mobile-access`, so a new conversation can walk the whole configuration |
+| **Session renewal** | Every app load re-mints the phone's cookie with a full lifetime, plus a manual *Renew this device now* button |
+| **Advertised URL** | One button that makes the platform advertise the tunnel hostname, and one that puts it back to `127.0.0.1` |
 | **Devices** | A read-only view of the phones that recently loaded the UI (name, client, first/last seen, address) |
 | **Pairing lifetime** | The platform's real `cookieMaxAgeDays`, and one button that revokes every paired browser session |
 | **Phone layout** | A switch for the narrow-viewport tweaks (touch-sized controls, 16px inputs, safe-area padding) |
@@ -31,13 +35,73 @@ That choice has two costs, and both are worth stating plainly:
 
 The device list is a **view, not an authority**: the injected heartbeat records which phone loaded the page, and that row cannot revoke anything.
 
+## Requirements
+
+- A DeepSeek Harness install with a `web` profile. This is a **profile bundle**: it adds one host row and one settings section, nothing else.
+- `cloudflared` — only for remote access. The panel detects it, shows the install command for your platform, and the guided login or an API token does the rest. Loopback-only use needs nothing.
+- A domain whose DNS Cloudflare serves — only for remote access. No public server, no open inbound port.
+- Node 20+ and no runtime dependencies (the plugin uses `node:crypto` and the platform's own services).
+
 ## Install
 
 ```sh
+# from GitHub (pnpm resolves the default branch)
+dsh plugin --profile web add github:mathangler/dsh-mobile-console
+
+# or from a checkout on disk — the form used while developing this plugin
 dsh plugin --profile web add /absolute/path/to/dsh-mobile-console
 ```
 
-Or install the workspace directory through the plugin manager (`install_bundle`). Then open **Settings → Mobile Access**.
+`dsh plugin` forwards its arguments to `pnpm` inside the profile directory, and every dependency that declares `dsh.bundle` is appended to `dsh.profile.bundles`. If your network blocks git over HTTPS, use the checkout form.
+
+Then:
+
+1. **Restart the Harness.** The host half — routes, the managed tunnel child, the setup skill — is loaded at startup.
+2. Open **Settings → Mobile Access**. That section is the whole interface.
+
+Installing also installs the setup skill, so a new conversation can walk the whole configuration for you: ask it to *configure phone access*.
+
+## Update
+
+```sh
+dsh plugin --profile web add github:mathangler/dsh-mobile-console   # re-resolve the branch
+dsh plugin --profile web update dsh-mobile-console                  # or update the dependency
+```
+
+Then restart the Harness. Everything the panel wrote survives an update, because it lives in **your** profile patch layer rather than in the package: the hostname, the tunnel name, the `trustedHosts` entry, the advertised URL and the cloudflared settings. The device list and the Cloudflare credentials live in the Harness credential store and survive as well.
+
+## Uninstall
+
+```sh
+dsh plugin --profile web remove dsh-mobile-console
+```
+
+Then restart the Harness. The package, its row and its settings section are gone, and the tunnel it was running dies with it — the child process belongs to the plugin's fiber.
+
+Deliberately left behind, because they are yours:
+
+| What | Where | How to clean it |
+|---|---|---|
+| Row config the panel wrote (hostname, tunnel name, advertised URL) | your profile's `cordis.patch.yml`, the `id: mobile-console` entry | delete that entry |
+| The trust entry | same file, `id: connection` → `trustedHosts` | drop the hostname from the list |
+| The Cloudflare tunnel, its DNS record and the stored connector token | Cloudflare, plus the Harness credential store | press **Teardown** in the panel's Advanced card *before* removing the plugin |
+| The written tunnel config | `~/.cloudflared/dsh-mobile-console.yml` | delete the file |
+| A stored Cloudflare API token | the Harness credential store (`CLOUDFLARE_API_TOKEN`) | panel → **Forget the stored API token** |
+
+## Usage
+
+The panel is a control surface, not a wizard. Five things, in the order you need them:
+
+1. **Fill in two fields** (in the Advanced card): the **hostname** the phone will open, for example `dsh-win.example.com`, and this machine's **tunnel name**, for example `dsh-win`. One hostname and one tunnel name per machine — a second machine gets its own.
+2. **Create the tunnel**, either way:
+   - **Check the environment → Start the browser login → Create the tunnel and configure**, or
+   - paste a Cloudflare API token → **Set up automatically**.
+   Both create the tunnel, publish the DNS record, write `~/.cloudflared/dsh-mobile-console.yml` and put the hostname into the platform's trust fence.
+3. **Press Start** on the cloudflared card. The tunnel runs as a child of the Harness: it starts when you start it, and it stops with the plugin or a restart.
+4. **Scan the entry QR code with the phone.** That single visit exchanges the process launch token for a signed cookie. The first arrival from a QR code or another app needs one refresh — the platform's cookie is `SameSite=Strict`, so it is not sent on the redirect that follows a cross-site navigation. Pasting the link into the address bar works first time.
+5. **Optionally create the Access application** (same card) so Cloudflare asks for an e-mail one-time PIN before any traffic reaches this machine.
+
+Day to day the phone stays paired by itself: every app load asks the host for a fresh tokenized URL, which re-mints the cookie with a full lifetime. Open the app at least once a month and it never lapses; **Renew this device now** does the same on demand. Revocation is all-at-once — **Revoke every paired browser session** (needs a restart, because the running process holds the old signing secret) — or per identity in Cloudflare Access. The device list is a **view**, not an authorization list.
 
 ## Configure
 

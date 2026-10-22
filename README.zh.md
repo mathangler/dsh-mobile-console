@@ -16,6 +16,10 @@ Harness 本身已经具备手机所需的一切：浏览器界面、每次启动
 | **信任判定** | 平台 `/api` 栅栏是否接受该隧道域名；一个按钮把它写进平台的 `connection` 行 |
 | **局域网入口** | 本机所有非回环地址；一个按钮把监听绑定到其中之一 |
 | **cloudflared 子进程** | 检测可执行文件、以受管子进程方式启停命名隧道、显示最近输出 |
+| **Cloudflare 自动配置** | 环境检测（可执行文件、证书、已保存令牌、域名）、显示授权链接的引导登录、一键 API Token 配置、可选的 Access 创建，以及清理 |
+| **配置 skill** | 安装插件即安装 `dsh-mobile-access`，可在新对话里让它带着走完整套配置 |
+| **会话续期** | 每次打开应用都会把手机 Cookie 重新签发为满有效期，另有「立即为本设备续期」按钮 |
+| **对外广播地址** | 一个按钮让平台广播隧道域名，另一个按钮改回 `127.0.0.1` |
 | **设备** | 只读列表：最近加载过界面的手机（名称、客户端、首次/最后在线、地址） |
 | **配对有效期** | 平台真实的 `cookieMaxAgeDays`，以及"撤销全部已配对浏览器会话"按钮 |
 | **手机端布局** | 窄屏微调开关（触控尺寸控件、16px 输入框、安全区留白） |
@@ -31,13 +35,73 @@ Harness 本身已经具备手机所需的一切：浏览器界面、每次启动
 
 设备列表是**看得见、不是授权依据**：注入的心跳脚本只记录哪台手机加载过页面，那一行无法撤销任何东西。
 
+## 环境要求
+
+- 一个带 `web` profile 的 DeepSeek Harness。本插件是**profile bundle**：只增加一个 host 行和一个设置区块。
+- `cloudflared`——只在需要远程访问时才要。面板会检测它、给出对应平台的安装命令，之后引导登录或 API Token 会把剩下的事做完。只用回环访问则什么都不需要。
+- 一个 DNS 由 Cloudflare 托管的域名——同样只在远程访问时才要。不需要公网服务器、不需要开放任何入站端口。
+- Node 20+，且本插件**没有任何运行时依赖**（只用到 `node:crypto` 与平台自身的服务）。
+
 ## 安装
 
 ```sh
+# 从 GitHub 安装（pnpm 解析默认分支）
+dsh plugin --profile web add github:mathangler/dsh-mobile-console
+
+# 或从本地检出安装——开发本插件时用的就是这种
 dsh plugin --profile web add /absolute/path/to/dsh-mobile-console
 ```
 
-或通过插件管理器安装该工作区目录（`install_bundle`）。然后打开 **设置 → 手机访问**。
+`dsh plugin` 会把参数原样转发给 profile 目录里的 `pnpm`；凡是声明了 `dsh.bundle` 的依赖都会被追加进 `dsh.profile.bundles`。如果你的网络封了 git over HTTPS，就用本地检出那种写法。
+
+然后：
+
+1. **重启 Harness**——host 半（路由、受管的 cloudflared 子进程、配置 skill）在启动时加载。
+2. 打开 **设置 → 手机访问**。这个区块就是全部界面。
+
+安装的同时会装上**配置 skill**，所以在新的对话里让它"配置手机访问"，它会带着你把整套配置走完。
+
+## 更新
+
+```sh
+dsh plugin --profile web add github:mathangler/dsh-mobile-console   # 重新解析分支
+dsh plugin --profile web update dsh-mobile-console                  # 或更新该依赖
+```
+
+然后重启 Harness。**面板写过的所有东西都会保留**，因为它们在你的 profile patch 层，而不在包里：域名、隧道名、`trustedHosts` 条目、对外广播地址、cloudflared 设置。设备列表与 Cloudflare 凭据在 Harness 凭据库里，同样保留。
+
+## 卸载
+
+```sh
+dsh plugin --profile web remove dsh-mobile-console
+```
+
+然后重启 Harness。包、它的行和设置区块都会消失；它托管的隧道也随之停止——那个子进程属于插件的 fiber。
+
+以下内容是**故意留下的**，因为它们属于你：
+
+| 内容 | 位置 | 怎么清理 |
+|---|---|---|
+| 面板写入的行配置（域名、隧道名、广播地址） | 你的 profile `cordis.patch.yml` 里 `id: mobile-console` 那条 | 删掉该条 |
+| 信任栅栏条目 | 同一文件的 `id: connection` → `trustedHosts` | 从列表里去掉该域名 |
+| Cloudflare 隧道、它的 DNS 记录、已保存的连接器令牌 | Cloudflare，以及 Harness 凭据库 | **卸载插件之前**先在面板「高级」里点 **清理** |
+| 写出的隧道配置 | `~/.cloudflared/dsh-mobile-console.yml` | 删掉该文件 |
+| 已保存的 Cloudflare API Token | Harness 凭据库（`CLOUDFLARE_API_TOKEN`） | 面板 → **清除已保存的 API Token** |
+
+## 使用
+
+面板是控制台，不是向导。按需要的顺序做这五件事：
+
+1. **填两个字段**（在「高级」卡片里）：手机要打开的**域名**（例如 `dsh-win.example.com`）和这台机器的**隧道名**（例如 `dsh-win`）。一台机器一个域名、一个隧道名——第二台机器用各自的。
+2. **建隧道**，两条路任选：
+   - **检测环境 → 开始浏览器登录 → 创建隧道并完成配置**，或
+   - 粘贴 Cloudflare API Token → **一键自动配置**。
+   两者都会创建隧道、发布 DNS 记录、写出 `~/.cloudflared/dsh-mobile-console.yml`，并把域名写进平台信任栅栏。
+3. **点 cloudflared 卡片的「启动」**。隧道作为 Harness 的子进程运行：你点它才启动，插件停用或重启后即停止。
+4. **用手机扫入口二维码**。这一次访问会把"本次进程的启动令牌"换成签名 Cookie。从二维码或别的 App 点开时，**第一次落地需要刷新一次**——平台的 Cookie 是 `SameSite=Strict`，跨站导航后的跳转不会带上它；把链接粘贴到地址栏则一次就能进。
+5. **可选：创建 Access 应用**（同一张卡片），让 Cloudflare 在任何流量到达这台机器之前先要一次邮箱验证码。
+
+日常使用中手机会自己保持配对：每次打开应用都会向 host 要一个带令牌的新地址，从而**重新签发一个满有效期的 Cookie**。只要每月至少打开一次就不会掉线；**立即为本设备续期**按钮可以随时手动做同一件事。撤销只有两条路——**撤销全部已配对浏览器会话**（需重启，因为运行中的进程仍持有旧签名密钥），或在 Cloudflare Access 里按身份撤销。设备列表是**看得见的记录，不是授权依据**。
 
 ## 配置
 
