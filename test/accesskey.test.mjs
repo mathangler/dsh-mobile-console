@@ -25,7 +25,17 @@ import {
   tempTokenExpiry,
   tempTokenMatches,
 } from '../lib/accesskey.js';
-import { UNLOCK_COOKIE, expiryFromDays, signTicket, unlockPageHtml } from '../lib/unlock.js';
+import {
+  UNLOCK_COOKIE,
+  deriveKey,
+  expiryFromDays,
+  newNonce,
+  newSalt,
+  proofFor,
+  signTicket,
+  unlockPageHtml,
+  verifyProof,
+} from '../lib/unlock.js';
 import {
   ACCESS_KEYS_RECORD_KEY,
   DEVICES_V2_RECORD_KEY,
@@ -690,6 +700,63 @@ test('the page-close beacon is idempotent and never throws', async () => {
   assert.equal(expired.ok, true);
   assert.equal(expired.value.closed, true, 'and the dead row is cleaned up');
   assert.equal((await endpoint(late, 'page-close', { token: lateToken })).value.closed, false, 'a second beacon is a no-op');
+});
+
+test('accepts the proof a real browser signs, and rejects the text-signed variant', async () => {
+  // The defect this locks shut: the host HMAC'd the base64 *text* of the nonce
+  // while the page signs the decoded *bytes* — so every real browser was denied,
+  // and a host-side test that signed the way the host does could never notice.
+  // This reproduces the page's algorithm with the real WebCrypto implementation.
+  const { subtle } = (await import('node:crypto')).webcrypto;
+  const toBytes = (text) => new Uint8Array(Buffer.from(text, 'base64'));
+  const toB64 = (buffer) => Buffer.from(new Uint8Array(buffer)).toString('base64');
+
+  const password = 'correct horse battery staple';
+  const salt = newSalt();
+  const iterations = 1000;
+  const key = deriveKey(password, salt, iterations);
+  const nonce = newNonce();
+
+  const material = await subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await subtle.deriveBits({ name: 'PBKDF2', salt: toBytes(salt), iterations, hash: 'SHA-256' }, material, 256);
+  const hmac = await subtle.importKey('raw', bits, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const browserProof = toB64(await subtle.sign('HMAC', hmac, toBytes(nonce)));
+  assert.equal(verifyProof(key, nonce, browserProof), true, 'the browser’s proof verifies');
+  assert.equal(browserProof, proofFor(key, nonce), 'and it is byte-for-byte what the host computes');
+
+  // The old scheme: signing the base64 text instead of the bytes it stands for.
+  const textProof = toB64(await subtle.sign('HMAC', hmac, new TextEncoder().encode(nonce)));
+  assert.notEqual(textProof, browserProof, 'the two schemes really do differ');
+  assert.equal(verifyProof(key, nonce, textProof), false, 'the text-signed variant is refused');
+
+  // The page's own sign call must be the byte form.
+  const script = unlockPageHtml({
+    prefix: CHANNEL,
+    configured: true,
+    title: 't',
+    subtitle: 's',
+    passwordLabel: 'p',
+    buttonLabel: 'b',
+    wrongLabel: 'w',
+    throttledLabel: 'th',
+    failedLabel: 'f',
+    missingLabel: 'm',
+    successLabel: 'ok',
+    openLabel: 'o',
+    qrLabel: 'qr',
+  }).split('<script>')[1].split('</script>')[0];
+  assert.doesNotThrow(() => new Function(script), 'the inline script parses');
+  assert.match(script, /subtle\.sign\('HMAC', hmac, fromB64\(challenge\.nonce\)\)/, 'the page signs the decoded nonce bytes');
+  assert.match(script, /subtle\.deriveBits\(\{ name: 'PBKDF2', salt: fromB64\(challenge\.salt\), iterations: challenge\.iterations, hash: 'SHA-256' \}, material, 256\)/);
+
+  // A malformed nonce is a miss, never a throw.
+  assert.equal(proofFor(key, 'not base64 at all!'), undefined);
+  assert.equal(proofFor(key, 'abc'), undefined, 'a nonce that is not whole base64 is not signed');
+  assert.equal(proofFor(key, ''), undefined);
+  assert.equal(proofFor(key, undefined), undefined);
+  assert.equal(verifyProof(key, 'not base64 at all!', browserProof), false);
+  assert.equal(verifyProof(key, '', browserProof), false);
+  assert.equal(verifyProof(key, nonce, undefined), false);
 });
 
 test('the served page arms a close beacon for the link it hands out', () => {
