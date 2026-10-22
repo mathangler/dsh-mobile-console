@@ -67,6 +67,24 @@ Everything lives in the plugin row's `config`, and the panel writes it into your
 | `narrowEnhance` | Apply the phone layout tweaks below 1024px (default `true`). |
 | `deviceRetentionDays` | Drop device rows unseen for this long (default 180). |
 
+### Automatic setup from the panel
+
+The *Cloudflare setup* card does the tunnel work for you. It first **checks the environment** — whether `cloudflared` is installed (and its version), whether `cert.pem` exists, whether an API token or connector token is stored, whether a hostname is configured — and then offers whichever path fits:
+
+- **No cloudflared?** The card shows the install command for your platform (`winget install --id Cloudflare.cloudflared`, `brew install cloudflared`, or the release page) and a *Check the environment* button to re-test after installing.
+- **Browser authorization.** *Start the browser login* runs `cloudflared tunnel login`, captures the `dash.cloudflare.com/argotunnel` URL it prints and shows it in the panel (the tab cloudflared opens works too), polls until `cert.pem` appears, then *Create the tunnel and configure* runs `tunnel create`, `tunnel route dns`, writes `~/.cloudflared/dsh-mobile-console.yml`, and adds the hostname to the platform trust fence.
+- **API token.** Paste a token with the permissions the card lists, press *Save and verify*, then *Set up automatically*: the plugin creates or reuses a remotely-managed tunnel, points its ingress at the local listener, publishes the proxied CNAME, stores the connector token, and trusts the hostname. No browser, no `cert.pem`.
+- **Access (optional).** Give an email and press *Create the Access application* for a self-hosted application with a one-time-PIN policy and a one-month session. The card also reports whether the Zero Trust organization has any login method at all.
+- **Teardown.** One button deletes the DNS record and tunnel this plugin created and forgets the stored connector token.
+
+Secrets live in the Harness credential store (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_TUNNEL_TOKEN`), never in configuration and never in a response. Every other value is written into your own profile patch layer.
+
+The one step no API can do is the nameserver change at your registrar — including for a domain registered at Tencent Cloud/DNSPod: add the domain in Cloudflare, then replace DNSPod's nameservers with the two Cloudflare assigns. Records still living at DNSPod stop answering, so import anything else you need (mail, other sites) into Cloudflare first; Cloudflare offers an import during onboarding. Wait for the zone to show **Active** (minutes to 24 hours) before the automatic setup can find it.
+
+### Does a Harness restart require re-pairing the phone?
+
+No. The launch token is per process, but it is only needed for the *initial* exchange: the cookie it mints is signed with a secret persisted in `$DSH_HOME/.credentials.yaml`, so a paired phone keeps working across restarts for `cookieMaxAgeDays` (default 30 days). Re-pairing is needed only when the cookie lifetime runs out, when you press *Revoke every paired browser session*, when the credentials file is deleted, when the hostname changes (cookies are bound to an authority), or when the Cloudflare Access session expires — and that last one asks for an email one-time PIN rather than a new pairing.
+
 ### Cloudflare walkthrough
 
 1. **Domain.** A domain registered anywhere works, as long as its DNS is served by Cloudflare: add the domain as a zone in the Cloudflare dashboard and change its nameservers at your registrar to the two Cloudflare assigns. Cloudflare does not sell or give away domains — it hosts DNS for the one you own.

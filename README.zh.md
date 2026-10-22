@@ -67,6 +67,24 @@ dsh plugin --profile web add /absolute/path/to/dsh-mobile-console
 | `narrowEnhance` | 是否在 1024px 以下应用手机端布局微调（默认 `true`）。 |
 | `deviceRetentionDays` | 超过该天数未再出现的设备记录会被清理（默认 180）。 |
 
+### 面板内的自动配置
+
+*Cloudflare 配置* 卡片会替你把隧道这部分做完。它先**检测环境**——cloudflared 是否安装（及版本）、`cert.pem` 是否存在、是否已保存 API Token 或连接器令牌、是否已配置域名——然后给出适合当前状态的路径：
+
+- **没有 cloudflared？** 卡片显示对应平台的安装命令（`winget install --id Cloudflare.cloudflared`、`brew install cloudflared`，或 releases 页面），装完点"检测环境"重新检测。
+- **浏览器授权。** 点"开始浏览器登录"会运行 `cloudflared tunnel login`，把它打印的 `dash.cloudflare.com/argotunnel` 网址抓到面板里显示（cloudflared 自动打开的那个标签同样可用），轮询直到 `cert.pem` 出现；再点"创建隧道并完成配置"，它会执行 `tunnel create`、`tunnel route dns`，写出 `~/.cloudflared/dsh-mobile-console.yml`，并把域名加入平台信任栅栏。
+- **API Token。** 粘贴一个具备卡片所列权限的 Token，点"保存并验证"，再点"一键自动配置"：插件创建或复用一条远端托管隧道、把 ingress 指向本机监听、发布代理 CNAME、保存连接器令牌、信任该域名。不需要浏览器，也不需要 `cert.pem`。
+- **Access（可选）。** 填一个邮箱，点"创建 Access 应用"，得到一个自托管应用 + 只允许该邮箱的 One-time PIN 策略 + 1 个月会话。卡片同时会报告该 Zero Trust 组织是否配置了任何登录方式。
+- **清理。** 一个按钮删除本插件创建的 DNS 记录与隧道，并清除已保存的连接器令牌。
+
+机密保存在 Harness 凭据库（`CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_TUNNEL_TOKEN`），**不进配置、不进任何响应**；其余每个值都写进你自己的 profile patch 层。
+
+唯一 API 做不到的一步是注册商处的 NS 修改——包括腾讯云/DNSPod 注册的域名：先在 Cloudflare 添加域名，再把 DNSPod 的 DNS 服务器换成 Cloudflare 分配的那两个。留在 DNSPod 的记录会随之失效，所以企业邮箱/其它站点要先导入 Cloudflare（添加站点时它提供导入）。等 zone 状态变成 **Active**（几分钟到 24 小时）后，自动配置才能找到它。
+
+### Harness 重启后手机需要重新授权吗？
+
+**不需要。** 启动令牌是每次进程生成的，但它只用于**首次**换取 Cookie：那个 Cookie 用持久化在 `$DSH_HOME/.credentials.yaml` 的密钥签名，所以已配对的手机在重启后依然有效，直到 `cookieMaxAgeDays`（默认 30 天）到期。只有这些情况才需要重新配对：Cookie 到期、你按了"撤销全部已配对浏览器会话"、凭据文件被删除、域名变了（Cookie 绑定 authority），或 Cloudflare Access 会话到期——而最后这一种要的是重新过一次邮箱验证码，不是重新配对。
+
 ### Cloudflare 配置步骤
 
 1. **域名。** 在任何注册商注册的域名都可以，只要它的 DNS 由 Cloudflare 托管：在 Cloudflare 控制台把域名添加为 zone，然后到注册商处把 NS 改成 Cloudflare 分配的那两个。Cloudflare 本身不赠送域名，它只是托管你拥有的那个域名的 DNS。

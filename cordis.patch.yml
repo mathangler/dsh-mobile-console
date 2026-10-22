@@ -22,10 +22,18 @@
 #   publicUrl       advertised root, e.g. 'https://dsh.example.com'
 #   lanHost         concrete local interface literal for a LAN entry,
 #                   e.g. '10.0.161.47' (never a wildcard address)
-#   cloudflared     { command, args } to manage as a child process, e.g.
+#   tunnelName      tunnel name the automatic setup creates or reuses
+#                   (default 'dsh-mobile-console'; use one name per machine)
+#   accessEmail     email the optional Cloudflare Access policy allows
+#   cloudflared     { command, args } for a tunnel you manage yourself, e.g.
 #                   { command: 'cloudflared', args: ['tunnel', 'run', 'dsh-mobile'] }
+#                   (the guided login and the API setup need no args)
 #   narrowEnhance   apply the phone layout tweaks on a narrow viewport (default true)
 #   deviceRetentionDays  drop device rows unseen for this long (default 180)
+#
+# Secrets never live here: the automatic setup stores the Cloudflare API token
+# and the tunnel connector token in the Harness credential store under
+# CLOUDFLARE_API_TOKEN and CLOUDFLARE_TUNNEL_TOKEN.
 
 - insert:
     - id: mobile-console
