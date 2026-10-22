@@ -3,6 +3,9 @@
 // migration, the derived status, and the "never delete a still-valid row" rule.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   ACCESS_KEY_PREFIX,
   CREDENTIAL_BODY_RE,
@@ -35,8 +38,11 @@ import {
   migrateLegacyDeviceRows,
   modeFromBindHost,
   parseDeviceRows,
+  patchRowConfig,
   publicDeviceRow,
   publicKeyRow,
+  resolveLinkBase,
+  storablePayload,
 } from '../lib/index.js';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -262,6 +268,80 @@ test('derives the mode from the address the listener is bound to', () => {
   assert.equal(modeFromBindHost(undefined), 'public');
 });
 
+test('resolves link authorities in order, and says how far they reach', () => {
+  const lan = { bindHost: '10.0.161.47', port: 3080, requestHost: '10.0.161.47:3080', requestScheme: 'http' };
+  const loopback = { bindHost: '127.0.0.1', port: 3080, requestHost: '127.0.0.1:3080', requestScheme: 'http' };
+
+  // (a) An advertised public URL wins over everything, scheme as configured.
+  assert.deepEqual(resolveLinkBase({ ...loopback, publicUrl: 'https://dsh.example.com/', tunnelHost: 'other.example.com' }), {
+    base: 'dsh.example.com',
+    scheme: 'https',
+    reachable: 'public',
+  });
+  assert.deepEqual(resolveLinkBase({ ...lan, publicUrl: 'https://dsh.example.com:8443/mount' }), {
+    base: 'dsh.example.com:8443',
+    scheme: 'https',
+    reachable: 'public',
+  });
+  // An advertised URL that only names this machine is reported as such, so the
+  // panel can warn instead of printing a link a phone cannot open.
+  assert.deepEqual(resolveLinkBase({ publicUrl: 'http://127.0.0.1:3080/' }), {
+    base: '127.0.0.1:3080',
+    scheme: 'http',
+    reachable: 'loopback-only',
+  });
+  assert.equal(resolveLinkBase({ publicUrl: 'http://10.0.161.47:3080' }).reachable, 'lan');
+  // A scheme-less advertised name is a public one, so it gets https.
+  assert.deepEqual(resolveLinkBase({ publicUrl: 'dsh.example.com' }), {
+    base: 'dsh.example.com',
+    scheme: 'https',
+    reachable: 'public',
+  });
+
+  // (b) No advertised URL: the configured tunnel hostname, always https.
+  assert.deepEqual(resolveLinkBase({ ...loopback, tunnelHost: 'dsh.example.com' }), {
+    base: 'dsh.example.com',
+    scheme: 'https',
+    reachable: 'public',
+  });
+  assert.deepEqual(resolveLinkBase({ tunnelHost: 'dsh.example.com:8443' }), {
+    base: 'dsh.example.com:8443',
+    scheme: 'https',
+    reachable: 'public',
+  });
+  // A hostname that cannot be an authority is skipped rather than emitted.
+  assert.equal(resolveLinkBase({ ...loopback, tunnelHost: 'https://dsh.example.com/x' }).base, '127.0.0.1:3080');
+
+  // (c) No tunnel: a non-loopback bind is LAN mode, so the LAN address beats the
+  // request's own Host — which is exactly the desktop-panel case.
+  assert.deepEqual(resolveLinkBase({ ...lan, requestHost: '127.0.0.1:3080' }), {
+    base: '10.0.161.47:3080',
+    scheme: 'http',
+    reachable: 'lan',
+  });
+  assert.deepEqual(resolveLinkBase({ bindHost: 'fe80::1', port: 3080 }), {
+    base: '[fe80::1]:3080',
+    scheme: 'http',
+    reachable: 'lan',
+  });
+
+  // (d) Last resort: the request's own Host and scheme.
+  assert.deepEqual(resolveLinkBase({ ...loopback, requestHost: 'dsh.example.com', requestScheme: 'https' }), {
+    base: 'dsh.example.com',
+    scheme: 'https',
+    reachable: 'public',
+  });
+  assert.equal(resolveLinkBase({ ...loopback, requestHost: '10.0.161.32:3080' }).reachable, 'lan');
+  assert.deepEqual(resolveLinkBase({ ...loopback, requestHost: '', requestScheme: 'https' }), {
+    base: '127.0.0.1:3080',
+    scheme: 'https',
+    reachable: 'loopback-only',
+  });
+  assert.deepEqual(resolveLinkBase({}), { base: '127.0.0.1:3080', scheme: 'http', reachable: 'loopback-only' });
+  assert.equal(resolveLinkBase({ bindHost: '10.0.161.47', port: Number.NaN }).base, '10.0.161.47:3080', 'a nonsense port falls back');
+  assert.equal(resolveLinkBase({ bindHost: '10.0.161.47', port: 0 }).base, '10.0.161.47:3080');
+});
+
 test('keeps the new records under the plugin scope, apart from the legacy ones', () => {
   assert.equal(DEVICES_V2_RECORD_KEY, 'dsh-remote-access/devices-v2');
   assert.equal(ACCESS_KEYS_RECORD_KEY, 'dsh-remote-access/access-keys');
@@ -286,7 +366,7 @@ test('gives every record a fresh id that is not part of a fingerprint', () => {
 // paths that answer without proxying the platform index are exercised here.
 
 /** A host context with just enough of the seam for the endpoint map. */
-function hostCtx({ records = new Map(), secrets = new Map(), config, editor, connection, port = 3080 } = {}) {
+function hostCtx({ records = new Map(), secrets = new Map(), config, editor, connection, port = 3080, documentPath } = {}) {
   const routes = { prefix: [], exact: new Map() };
   const credentials = {
     readRecord: async (key) => records.get(key),
@@ -304,6 +384,7 @@ function hostCtx({ records = new Map(), secrets = new Map(), config, editor, con
   const configEditor = {
     rows,
     edits: [],
+    documentPath,
     entries: () => rows.map((row) => row.entry),
     configuration: () => rows,
     edit: async (entry, mutate) => {
@@ -419,6 +500,19 @@ async function endpoint(ctx, name, body, options) {
   await ctx.routes.prefix[0](fakeRequest(body, { ...options, url: `${CHANNEL}/${name}` }), res);
   const payload = res.body === undefined ? undefined : JSON.parse(res.body);
   return { status: res.statusCode, ok: payload?.ok, value: payload?.value, error: payload?.error, res };
+}
+
+/** Call one route by its full path, for the self-authenticating ones. */
+async function route(ctx, path, body, options) {
+  const res = fakeResponse();
+  await ctx.routes.prefix[0](fakeRequest(body, { ...options, url: path }), res);
+  let payload;
+  try {
+    payload = res.body === undefined ? undefined : JSON.parse(res.body);
+  } catch {
+    payload = undefined;
+  }
+  return { status: res.statusCode, ok: payload?.ok, value: payload?.value, error: payload?.error, body: res.body, res };
 }
 
 test('mints, lists, resets and revokes a key through the endpoint map', async () => {
@@ -637,6 +731,75 @@ test('exchanges a launch token for the platform cookie, keeping ours', async () 
   assert.equal(answer.statusCode, 502, 'and failed closed, because nothing listens on port 0');
 });
 
+test('bootstraps a loopback launch-token visit through the platform authorizer', async () => {
+  // The desktop opens the printed `?token=` URL at 127.0.0.1. The platform only
+  // mints its cookie for a path of exactly `/`, and the index proxy below asks
+  // for `/index.html`, so the gate must run the authorizer itself here too.
+  const platform = {
+    requestRejection: () => 401,
+    authorizeIndex: (req, res) => {
+      const url = new URL(String(req.url ?? '/'), 'http://dsh.invalid');
+      if (req.method === 'GET' && url.pathname === '/' && url.searchParams.get('token') === 'launch-token') {
+        res.writeHead(303, { location: './', 'set-cookie': 'dsh-session=ok; Path=/; HttpOnly' });
+        res.end();
+        return false;
+      }
+      res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('unauthorized');
+      return false;
+    },
+  };
+  const ctx = hostCtx({ connection: platform });
+  const root = ctx.routes.exact.get('/');
+  const local = { url: '/?token=launch-token', headers: { host: '127.0.0.1:3080' }, remoteAddress: '127.0.0.1', method: 'GET' };
+
+  const first = fakeResponse();
+  await root(fakeRequest(undefined, local), first);
+  assert.equal(first.statusCode, 303, 'a fresh local browser bootstraps instead of getting a 401');
+  const cookies = [].concat(first.headers['set-cookie']);
+  assert.ok(cookies.some((cookie) => cookie.startsWith('dsh-session=ok')), 'the platform cookie is handed over');
+  assert.ok(cookies.some((cookie) => cookie.startsWith('mc-device=')), 'and our device credential too');
+  assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices[0].source, 'entry-link');
+
+  // A stale token is still the platform's own answer, and a plain loopback visit
+  // (no token at all) is untouched: it is proxied as before.
+  const stale = fakeResponse();
+  await root(fakeRequest(undefined, { ...local, url: '/?token=stale' }), stale);
+  assert.equal(stale.statusCode, 401);
+  const plain = hostCtx({ connection: { requestRejection: () => undefined }, port: 0 });
+  const forwarded = fakeResponse();
+  await plain.routes.exact.get('/')(fakeRequest(undefined, { url: '/', headers: { host: '127.0.0.1:3080' }, remoteAddress: '127.0.0.1', method: 'GET' }), forwarded);
+  assert.equal(await waitFor(() => forwarded.body !== undefined), true);
+  assert.equal(forwarded.statusCode, 502, 'a loopback visit with no token is proxied to the index, as before');
+});
+
+test('serves the pairing door with or without a password, and stays quiet otherwise', async () => {
+  const ctx = hostCtx();
+  const minted = await endpoint(ctx, 'pair-code', { days: 30 });
+  const code = minted.value.code;
+
+  // No password is stored at all: the page and the password endpoints behave as
+  // if they did not exist...
+  assert.equal((await route(ctx, `${CHANNEL}/unlock`, undefined, { method: 'GET' })).status, 404);
+  assert.equal((await route(ctx, `${CHANNEL}/unlock/challenge`, {}, { method: 'POST' })).status, 404);
+  assert.equal((await route(ctx, `${CHANNEL}/unlock/verify`, {}, { method: 'POST' })).status, 404);
+
+  // ...but a pairing code still redeems, because the panel can mint one without
+  // a password and the code is its own single-use, rate-limited credential.
+  const redeemed = await route(ctx, `${CHANNEL}/unlock/pair`, { code }, { method: 'POST' });
+  assert.equal(redeemed.ok, true, JSON.stringify(redeemed.error));
+  assert.equal(redeemed.value.days, 30);
+  assert.match(String(redeemed.res.headers['set-cookie']), /mc-device=/);
+  assert.equal((await route(ctx, `${CHANNEL}/unlock/pair`, { code }, { method: 'POST' })).ok, false, 'the code is single use');
+
+  // With a password armed, the page and the challenge come back.
+  await endpoint(ctx, 'recovery-set', { password: 'a very long password' });
+  assert.equal((await route(ctx, `${CHANNEL}/unlock`, undefined, { method: 'GET' })).status, 200);
+  assert.equal((await route(ctx, `${CHANNEL}/unlock/challenge`, {}, { method: 'POST' })).ok, true);
+  const second = await endpoint(ctx, 'pair-code', { days: null });
+  assert.equal((await route(ctx, `${CHANNEL}/unlock/pair`, { code: second.value.code }, { method: 'POST' })).ok, true, 'and the pairing door keeps working');
+});
+
 test('reports the mode and switches the bind without starting a tunnel', async () => {
   const ctx = hostCtx();
   const status = await endpoint(ctx, 'mode-status', {});
@@ -656,33 +819,163 @@ test('reports the mode and switches the bind without starting a tunnel', async (
   const nonsense = await endpoint(ctx, 'set-mode', { mode: 'sideways' });
   assert.equal(nonsense.ok, false);
   assert.match(nonsense.error.message, /'lan' or 'public'/);
+});
 
-  // With the editor present, LAN mode binds the chosen address, trusts the very
-  // authority the browser will use, stops any tunnel, and reports the mode back.
-  const wired = hostCtx({ editor: webServerRows() });
-  const lan = await endpoint(wired, 'set-mode', { mode: 'lan', host: '10.0.161.47' });
-  assert.equal(lan.ok, true, JSON.stringify(lan.error));
-  assert.equal(lan.value.mode, 'lan');
-  assert.equal(lan.value.host, '10.0.161.47');
-  assert.equal(lan.value.authority, '10.0.161.47:3080');
-  assert.deepEqual(lan.value.trustedHosts, ['10.0.161.47:3080']);
-  assert.equal(lan.value.restartRequired, true);
-  assert.equal(wired.editsFor('webserver').at(-1).next.host, '10.0.161.47');
-  assert.equal((await endpoint(wired, 'mode-status', {})).value.mode, 'lan');
-  assert.equal((await endpoint(wired, 'mode-status', {})).value.host, '10.0.161.47');
+test('rewrites only the named keys of one profile row', () => {
+  const patch = [
+    '# a comment that must survive',
+    '- id: webserver',
+    '  name: "@deepseek-ai/dsh-host-webserver"',
+    '  config:',
+    '    host: 127.0.0.1',
+    '    port: !!js ctx.webStartup.port ?? 3080',
+    '    tls: !!js ctx.webStartup.tls',
+    '    compression: gzip',
+    '- id: connection',
+    '  name: "@deepseek-ai/dsh-client-connection"',
+    '  config:',
+    '    trustedHosts:',
+    '      - dsh-win.example.com:443',
+    '      - 192.168.31.186:3199',
+    '- id: other',
+    '  config:',
+    '    host: keep-me',
+    '',
+  ].join('\n');
 
-  // Back to loopback: the same write as `public`, and the tunnel is never started.
-  const restored = await endpoint(wired, 'restore-loopback', {});
-  assert.equal(restored.ok, true, JSON.stringify(restored.error));
-  assert.deepEqual(restored.value, { mode: 'public', host: '127.0.0.1', restartRequired: true });
-  assert.equal(wired.editsFor('webserver').at(-1).next.host, '127.0.0.1');
-  assert.equal((await endpoint(wired, 'mode-status', {})).value.mode, 'public');
+  const hostChanged = patchRowConfig(patch, 'webserver', { host: '10.0.161.47' });
+  assert.ok(hostChanged.includes('    host: 10.0.161.47'));
+  assert.ok(hostChanged.includes('    host: keep-me'), 'another row keeps its own host');
+  assert.ok(hostChanged.includes('    port: !!js ctx.webStartup.port ?? 3080'), 'the !!js expressions survive');
+  assert.ok(hostChanged.includes('    tls: !!js ctx.webStartup.tls'));
+  assert.ok(hostChanged.includes('    compression: gzip'));
+  assert.ok(hostChanged.includes('      - dsh-win.example.com:443'), 'another row is untouched');
+  assert.ok(hostChanged.includes('# a comment that must survive'));
+  assert.equal(hostChanged.split('\n').length, patch.split('\n').length, 'a scalar rewrite is one for one');
 
-  // Idempotent: already loopback means success with no further write.
-  const writes = wired.editsFor('webserver').length;
-  const again = await endpoint(wired, 'restore-loopback', {});
-  assert.deepEqual(again.value, { mode: 'public', host: '127.0.0.1', restartRequired: true });
-  assert.equal(wired.editsFor('webserver').length, writes, 'nothing is rewritten when nothing changes');
+  // A list is replaced wholesale, and the merge the caller did is what lands.
+  const hostsChanged = patchRowConfig(patch, 'connection', { trustedHosts: ['dsh-win.example.com:443', '10.0.161.47:3080'] });
+  assert.ok(hostsChanged.includes('    trustedHosts:\n      - dsh-win.example.com:443\n      - 10.0.161.47:3080\n'));
+  assert.ok(!hostsChanged.includes('192.168.31.186:3199'), 'the old list is gone, not appended to');
+  assert.ok(hostsChanged.includes('    host: 127.0.0.1'), 'the webserver row is untouched');
+
+  // A key the row does not have yet is added, in front of the ones it has.
+  const added = patchRowConfig(patch, 'other', { port: 3199 });
+  assert.ok(added.includes('- id: other\n  config:\n    port: 3199\n    host: keep-me'), 'the new key goes first');
+  // A row with no config block at all gets one.
+  const fresh = patchRowConfig('- id: bare\n  name: x\n', 'bare', { host: '127.0.0.1' });
+  assert.equal(fresh, '- id: bare\n  name: x\n  config:\n    host: 127.0.0.1\n');
+  // A row that is not there at all is appended, with its plugin name, and only
+  // when the caller could supply one.
+  const appended = patchRowConfig(patch, 'new-row', { host: '127.0.0.1' }, 'dsh-new-row');
+  assert.ok(appended.endsWith('- id: new-row\n  name: dsh-new-row\n  config:\n    host: 127.0.0.1\n'));
+  assert.equal(patchRowConfig(patch, 'new-row', { host: '127.0.0.1' }), undefined, 'no name, no faithful append');
+
+  // Idempotent: the text comes back unchanged when it already says this.
+  assert.equal(patchRowConfig(hostChanged, 'webserver', { host: '10.0.161.47' }), hostChanged);
+
+  // CRLF survives.
+  const crlf = patch.replace(/\n/g, '\r\n');
+  assert.ok(patchRowConfig(crlf, 'webserver', { host: '10.0.0.9' }).includes('\r\n    host: 10.0.0.9\r\n'));
+
+  // Refusals, so the caller can fall back rather than guess.
+  assert.equal(patchRowConfig('id: not-a-sequence\n', 'webserver', { host: 'x' }), undefined);
+  assert.equal(patchRowConfig('- id: webserver\n  config: { host: 127.0.0.1 }\n', 'webserver', { host: 'x' }), undefined);
+  assert.equal(patchRowConfig('- id: webserver\n  insert:\n    - id: webserver\n', 'webserver', { host: 'x' }), undefined);
+  assert.equal(patchRowConfig('', 'webserver', { host: 'x' }), undefined);
+  assert.equal(patchRowConfig(patch, 'webserver', null), undefined);
+});
+
+test('never writes a credential value JSON cannot hold', () => {
+  const payload = storablePayload({ version: 2, devices: [{ id: 'a', lastUsedIp: undefined, name: 'x' }] }, 'test');
+  assert.deepEqual(payload, { version: 2, devices: [{ id: 'a', name: 'x' }] }, 'an absent field is dropped, not written as null');
+  assert.equal(JSON.stringify(payload).includes('undefined'), false);
+  assert.equal(storablePayload({ a: null, b: false, c: 0, d: '' }, 'test').b, false, 'falsy values are kept');
+  assert.throws(() => storablePayload({ a: Number.NaN }, 'test'), /a is NaN/);
+  assert.throws(() => storablePayload({ a: Number.POSITIVE_INFINITY }, 'test'), /Infinity/);
+  assert.throws(() => storablePayload({ a: () => {} }, 'test'), /function/);
+  assert.throws(() => storablePayload({ a: [undefined] }, 'test'), /a\[0\] is undefined/);
+  const circular = { id: 'x' };
+  circular.self = circular;
+  assert.throws(() => storablePayload(circular, 'test'), /circular/);
+});
+
+test('switches the bind through the profile patch, merging trusted hosts', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-remote-access-'));
+  const path = join(dir, 'cordis.patch.yml');
+  const original = [
+    '- id: webserver',
+    '  name: "@deepseek-ai/dsh-host-webserver"',
+    '  config:',
+    '    host: 127.0.0.1',
+    '    port: !!js ctx.webStartup.port ?? 3080',
+    '- id: connection',
+    '  name: "@deepseek-ai/dsh-client-connection"',
+    '  config:',
+    '    trustedHosts:',
+    '      - dsh-win.mathangler.site',
+    '',
+  ].join('\n');
+  writeFileSync(path, original);
+  try {
+    const rows = webServerRows();
+    const connected = rows.find((row) => row.entry.options.id === 'connection');
+    connected.entry.options.config = { trustedHosts: ['dsh-win.mathangler.site'] };
+    const wired = hostCtx({ editor: rows, documentPath: path });
+
+    const lan = await endpoint(wired, 'set-mode', { mode: 'lan', host: '10.0.161.47' });
+    assert.equal(lan.ok, true, JSON.stringify(lan.error));
+    assert.equal(lan.value.mode, 'lan');
+    assert.equal(lan.value.host, '10.0.161.47');
+    assert.equal(lan.value.authority, '10.0.161.47:3080');
+    assert.equal(lan.value.restartRequired, true);
+    assert.equal(lan.value.appliesImmediately, true, 'a bind write applies as soon as the file changes');
+    assert.equal(lan.value.rebindMayDropThisPage, true);
+
+    const afterLan = readFileSync(path, 'utf8');
+    assert.ok(afterLan.includes('    host: 10.0.161.47'), 'the bind really changed on disk');
+    assert.ok(afterLan.includes('    port: !!js ctx.webStartup.port ?? 3080'), 'the !!js port survives');
+    // (D)(i): the existing trusted host is merged, never dropped.
+    assert.deepEqual(lan.value.trustedHosts, ['dsh-win.mathangler.site', '10.0.161.47:3080']);
+    assert.ok(afterLan.includes('      - dsh-win.mathangler.site\n'), 'the existing entry survives');
+    assert.ok(afterLan.includes('      - 10.0.161.47:3080\n'), 'the new authority is added');
+    assert.equal(wired.editsFor('connection').length, 0, 'the platform editor is not used for these rows');
+    assert.equal(wired.editsFor('webserver').length, 0);
+
+    // A repeated LAN switch changes nothing on disk.
+    const repeat = await endpoint(wired, 'set-mode', { mode: 'lan', host: '10.0.161.47' });
+    assert.equal(repeat.ok, true);
+    assert.equal(readFileSync(path, 'utf8'), afterLan, 'a repeat is a no-op');
+
+    // And the way back works — in the same process, which the platform editor
+    // could no longer do once its HMR transaction had been nested.
+    const restored = await endpoint(wired, 'restore-loopback', {});
+    assert.equal(restored.value.mode, 'public');
+    assert.equal(restored.value.host, '127.0.0.1');
+    assert.equal(restored.value.restartRequired, true);
+    assert.equal(restored.value.appliesImmediately, true);
+    const afterRestore = readFileSync(path, 'utf8');
+    assert.ok(afterRestore.includes('    host: 127.0.0.1'), 'restore-loopback really restores');
+    assert.ok(afterRestore.includes('      - 10.0.161.47:3080\n'), '(D) the trusted list is not clobbered by the way back');
+    assert.equal(wired.editsFor('webserver').length, 0);
+
+    // Idempotent again, and honest about it.
+    const again = await endpoint(wired, 'restore-loopback', {});
+    assert.equal(again.value.appliesImmediately, false, 'nothing changed, so nothing is being applied');
+    assert.equal(again.value.rebindMayDropThisPage, false);
+    assert.equal(readFileSync(path, 'utf8'), afterRestore);
+
+    // No temporary neighbours are left behind by the atomic write.
+    assert.deepEqual(readdirSync(dir).filter((name) => name.includes('.tmp')), []);
+
+    // The platform editor is still the fallback when the patch path is unknown.
+    const fallback = hostCtx({ editor: webServerRows() });
+    const viaEditor = await endpoint(fallback, 'set-mode', { mode: 'lan', host: '10.0.161.47' });
+    assert.equal(viaEditor.ok, true);
+    assert.equal(fallback.editsFor('webserver').at(-1).next.host, '10.0.161.47');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('reports the Cloudflare Access state and never throws without a token', async () => {

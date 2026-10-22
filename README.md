@@ -12,10 +12,10 @@ This plugin is that part:
 
 | Panel section | What it gives you |
 |---|---|
-| **Access mode** | A two-way switch, **Local network** / **Public**, auto-detected from the current bind and overridable. Only the selected mode's settings render. |
-| **Entry link** | The tokenized URL the device opens, with a QR code. Under **Local network** it is labelled *Temporary: it dies with this process*; the platform's launch token is per process either way. |
+| **Access mode** | A two-button switch, **Local network** / **Public**, auto-detected from the current bind. The switch only **previews** a mode; **Enable this mode** applies it (immediately — reopen the panel at the new address; a restart is still recommended). Only the previewed mode's settings render. |
+| **Entry link** | The tokenized URL the device opens, with its QR code behind a **Show QR** toggle. Under **Local network** it is labelled *Temporary: it dies with this process*; the platform's launch token is per process either way. |
 | **One-time pairing code** | Eight characters, ten minutes, single use, with a QR code that carries the code in a URL — for a device that cannot reach this screen's QR code. |
-| **Authorized devices** | The authority list: every credential this machine handed out (source, temporary/long-lived, created, last used + client IP, explicit expiry, status), each revocable, renamable and re-datable on its own. |
+| **Authorized devices** | The authority list: every credential this machine handed out (source, temporary/long-lived, created, last used + client IP, explicit expiry, status), each revocable, renamable and re-datable on its own — plus **Get link**, which mints a fresh 15-minute single-use link for a live device. |
 | **Cloudflare tunnel** | A prominent **Start tunnel** button, the child process's state and recent output, and the hostname the tunnel serves. |
 | **Edge authentication** | Whether a Cloudflare Access application fronts the hostname — a status line that turns warning-coloured when it is off. |
 | **Advanced** | The Cloudflare setup (environment check, guided browser login, API token, teardown), the access keys, the recovery password, and the phone-layout tweak. |
@@ -96,28 +96,30 @@ Deliberately left behind, because they are yours:
 
 ### Choose a mode
 
-The panel starts on the mode the current bind implies: **Local network** when the listener is bound to one of this machine's own non-loopback addresses, **Public** when it is on `127.0.0.1`. Override it with the two-button switch at the top. Switching writes the profile config and **requires a dsh restart**; after a switch to Local network the desktop must use the new address too (a listener bound to one literal stops answering on `127.0.0.1`).
+The panel starts on the mode the current bind implies: **Local network** when the listener is bound to one of this machine's own non-loopback addresses, **Public** when it is on `127.0.0.1`. The two-button switch at the top is a **preview**: it only chooses which configuration is displayed, and nothing is written until you press **Enable this mode** (the panel shows *Currently enabled* when the previewed mode is already the live one). Enabling **takes effect immediately** — the listener rebinds, so this page may go blank or stop responding and you should reopen the panel at the new address; a dsh restart is still recommended. After enabling Local network, the desktop must use the new address too, because a listener bound to one literal stops answering on `127.0.0.1`.
 
 ### LAN steps
 
-1. Switch to **Local network** and pick an address from the list.
-2. **Restart dsh.** The bind is a listener option, so the panel says a restart is required instead of restarting the process under you.
-3. Open the entry link, or scan its QR code with the device. It is labelled **Temporary: it dies with this process**.
+1. Choose **Local network** and pick an address from the list — the switch only previews; nothing is written yet.
+2. Press **Enable this mode**. It applies immediately: the listener rebinds to that address, and this page may go blank or stop responding, so reopen the panel at the new address (`http://<address>:3080`). A dsh restart is still recommended.
+3. Open the entry link, or press **Show QR** and scan it with the device. It is labelled **Temporary: it dies with this process**.
 4. Nothing else is needed: there is **no device management in this mode**, because the platform's launch token dies with the process and this plugin keeps no long-lived record for it.
-5. To go back, press **Restore the loopback bind (127.0.0.1)** and restart.
+5. To go back, press **Restore the loopback bind (127.0.0.1)** — the page may go blank again, so reopen the panel at `http://127.0.0.1:3080`.
 
 ### Public steps
 
-1. Switch to **Public**. The listener stays on `127.0.0.1`.
+1. Choose **Public** and press **Enable this mode** — the listener returns to `127.0.0.1`, and if this page goes blank, reopen the panel there.
 2. Under **Advanced → Cloudflare setup**, fill in the hostname the device will open (for example `dsh-win.example.com`) and this machine's tunnel name (`dsh-win`), then create the tunnel either way:
    - **Check the environment → Start the browser login → Create the tunnel and configure**, or
    - paste a Cloudflare API token → **Set up automatically**.
    Both publish the DNS record, write `~/.cloudflared/dsh-remote-access.yml` and put the hostname into the platform's trust fence. Start the browser login **from the panel**: a login process started in a terminal is short-lived, gets killed before it can write `cert.pem`, and the authorization then looks like it did nothing.
-3. Press the prominent **Start tunnel** button on the Cloudflare tunnel card (the card's filled primary button, labelled **Start**). The tunnel runs as a child of the Harness and stops with the plugin or a restart.
-4. Pair a device: scan the entry link's QR code, or generate a pairing code (next section).
+3. Press the prominent **Start tunnel** button on the Cloudflare tunnel card. The tunnel runs as a child of the Harness and stops with the plugin or a restart.
+4. Pair a device: press **Show QR** on the entry link and scan it, or generate a pairing code (next section).
 5. Optionally create the Access application so Cloudflare asks for an e-mail one-time PIN before any traffic reaches this machine.
 
-The entry link's first visit exchanges the process launch token for the platform cookie. From a QR code or another app that first landing usually needs one refresh — the platform cookie is `SameSite=Strict`, so it is not sent on the redirect that follows a cross-site navigation. Pasting the link into the address bar works first time.
+The entry link's first visit exchanges the process launch token for the platform cookie. Its QR code is collapsed behind **Show QR**. From a QR code or another app that first landing usually needs one refresh — the platform cookie is `SameSite=Strict`, so it is not sent on the redirect that follows a cross-site navigation. Pasting the link into the address bar works first time.
+
+If the panel marks a generated link **loopback-only** — *this link only works on this machine* — the link cannot leave this computer: configure a domain under **Advanced → Cloudflare setup** (public mode), or switch to local network mode.
 
 ### Add a device by code or QR
 
@@ -139,7 +141,7 @@ With no password stored, the recovery page renders **nothing at all** and the pu
 
 The recovery order, in the order to try it:
 
-1. **The device record** — a device that paired once carries a plugin credential, and a lapsed platform cookie is renewed automatically when it returns.
+1. **The device record** — a device that paired once carries a plugin credential, and a lapsed platform cookie is renewed automatically when it returns. To hand a live device a fresh link by hand, press **Get link** on its row in **Authorized devices**: it mints a new 15-minute single-use link, with its own **Show QR** toggle.
 2. **An access key** — exchange it at `POST /remote-access/token` for a fresh single-use link.
 3. **The password** — visit `https://<hostname>/remote-access/unlock` and answer the challenge.
 4. **Reach the computer** — with none of the three, re-pairing needs the machine itself.
