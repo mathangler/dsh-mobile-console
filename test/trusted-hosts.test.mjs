@@ -14,6 +14,7 @@ import {
   isPrivateAddress,
   sameLan,
   absentText,
+  suggestedLabelFor,
   SECRET_REF_RE,
   SECRET_REFS,
 } from '../lib/index.js';
@@ -209,6 +210,20 @@ test('keeps the last-seen route on a device row', () => {
   assert.equal(second[0].lastVia, 'lan');
   assert.equal(second[0].lastIp, '10.0.161.23');
   assert.equal(second[0].firstSeenAt, t0);
+});
+
+test('suggests a hostname label from the machine platform', () => {
+  // A Mac must not be handed the Windows example: the panel renders this label
+  // into the hostname, tunnel-name and advertised-URL placeholders.
+  assert.equal(suggestedLabelFor('darwin'), 'dsh-mac');
+  assert.equal(suggestedLabelFor('win32'), 'dsh-win');
+  assert.equal(suggestedLabelFor('linux'), 'dsh-lin');
+  assert.equal(suggestedLabelFor('freebsd'), 'dsh-freebsd');
+  assert.equal(suggestedLabelFor(''), 'dsh');
+  assert.equal(suggestedLabelFor(undefined), 'dsh');
+  for (const platform of ['darwin', 'win32', 'linux']) {
+    assert.match(suggestedLabelFor(platform), /^[a-z][a-z0-9-]*$/, 'a label is a legal hostname label');
+  }
 });
 
 test('every stored secret ref can be parsed back at startup', () => {

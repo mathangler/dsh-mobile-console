@@ -92,11 +92,11 @@ Deliberately left behind, because they are yours:
 
 The panel is a control surface, not a wizard. Five things, in the order you need them:
 
-1. **Fill in two fields** (in the Advanced card): the **hostname** the phone will open, for example `dsh-win.example.com`, and this machine's **tunnel name**, for example `dsh-win`. One hostname and one tunnel name per machine — a second machine gets its own.
+1. **Fill in two fields** (in the Advanced card): the **hostname** the phone will open, for example `<label>.example.com`, and this machine's **tunnel name**, `<label>`. The panel suggests `<label>` from the machine's own platform — `dsh-mac` on macOS, `dsh-win` on Windows, `dsh-lin` on Linux — because each machine gets its own hostname and tunnel name.
 2. **Create the tunnel**, either way:
    - **Check the environment → Start the browser login → Create the tunnel and configure**, or
    - paste a Cloudflare API token → **Set up automatically**.
-   Both create the tunnel, publish the DNS record, write `~/.cloudflared/dsh-mobile-console.yml` and put the hostname into the platform's trust fence.
+   Both create the tunnel, publish the DNS record, write `~/.cloudflared/dsh-mobile-console.yml` and put the hostname into the platform's trust fence. Start the browser login **from the panel**: a login process started in a terminal is short-lived, gets killed before it can write `cert.pem`, and the authorization then looks like it did nothing.
 3. **Press Start** on the cloudflared card. The tunnel runs as a child of the Harness: it starts when you start it, and it stops with the plugin or a restart.
 4. **Scan the entry QR code with the phone.** That single visit exchanges the process launch token for a signed cookie. The first arrival from a QR code or another app needs one refresh — the platform's cookie is `SameSite=Strict`, so it is not sent on the redirect that follows a cross-site navigation. Pasting the link into the address bar works first time.
 5. **Optionally create the Access application** (same card) so Cloudflare asks for an e-mail one-time PIN before any traffic reaches this machine.
