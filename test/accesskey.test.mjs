@@ -677,6 +677,57 @@ test('the page-close beacon is idempotent and never throws', async () => {
   assert.equal((await endpoint(ctx, 'page-close', { token })).value.closed, true);
   assert.equal((await endpoint(ctx, 'page-close', { token })).value.closed, false);
   assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 0);
+
+  // A late beacon is the normal case, not an error: the link expired, or the
+  // page closed after the phone had already used it. Both answer the same shape.
+  const late = hostCtx();
+  const lateKey = await endpoint(late, 'key-create', { name: 'Phone' });
+  const lateLink = await endpoint(late, 'token', { key: lateKey.value.key });
+  const lateToken = new URL(lateLink.value.url).searchParams.get('token');
+  late.records.get(DEVICES_V2_RECORD_KEY).payload.devices[0].expiresAt = Date.now() - 1000;
+  const expired = await endpoint(late, 'page-close', { token: lateToken });
+  assert.equal(expired.status, 200, 'an expired link answers, never throws');
+  assert.equal(expired.ok, true);
+  assert.equal(expired.value.closed, true, 'and the dead row is cleaned up');
+  assert.equal((await endpoint(late, 'page-close', { token: lateToken })).value.closed, false, 'a second beacon is a no-op');
+});
+
+test('the served page arms a close beacon for the link it hands out', () => {
+  const html = unlockPageHtml({
+    prefix: CHANNEL,
+    configured: true,
+    title: 't',
+    subtitle: 's',
+    passwordLabel: 'p',
+    buttonLabel: 'b',
+    wrongLabel: 'w',
+    throttledLabel: 'th',
+    failedLabel: 'f',
+    missingLabel: 'm',
+    successLabel: 'ok',
+    openLabel: 'o',
+    qrLabel: 'qr',
+  });
+  const script = html.split('<script>')[1].split('</script>')[0];
+  // It compiles: a template literal that breaks the page is the failure mode
+  // that no amount of string matching would catch.
+  assert.doesNotThrow(() => new Function(script), 'the inline script parses');
+
+  assert.match(script, /addEventListener\('pagehide', closeLink\)/, 'pagehide is the primary signal');
+  assert.match(script, /addEventListener\('visibilitychange'/, 'and visibilitychange is the fallback');
+  assert.match(script, /document\.visibilityState === 'hidden'/, 'which fires when the page is hidden');
+  assert.match(script, /navigator\.sendBeacon\(url, new Blob\(\[payload\], \{ type: 'application\/json' \}\)\)/, 'sendBeacon carries a JSON blob');
+  assert.match(script, /keepalive: true/, 'and the fetch fallback keeps the request alive');
+  assert.match(script, /PREFIX \+ '\/page-close'/, 'posted to the close endpoint');
+  // The token is only ever in the body: no URL, no query string.
+  const beacon = script.slice(script.indexOf('function closeLink'), script.indexOf('function armClose'));
+  assert.ok(!beacon.includes('?token='), 'the token never reaches a URL');
+  assert.match(beacon, /JSON\.stringify\(\{ token: pendingToken \}\)/, 'it travels in the JSON body');
+  // Arming is conditional: a page that minted nothing never beacons.
+  assert.match(script, /token\.indexOf\('drt_'\) !== 0\) return;/, 'only our own one-time links arm it');
+  assert.match(script, /if \(beaconSent \|\| !pendingToken\) return;/, 'and it fires at most once');
+  // The link the page shows is handed to the arming helper on both paths.
+  assert.match(script, /function showEntry\(entry\)[\s\S]*?armClose\(entry\.url\)/, 'showing a link arms the beacon');
 });
 
 test('refuses a wrong key, and throttles per client and globally', async () => {
