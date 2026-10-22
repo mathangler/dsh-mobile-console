@@ -22,6 +22,7 @@ import {
   CHANNEL,
   HEARTBEAT_PATH,
   DEVICE_RECORD_KEY,
+  DEVICES_V2_RECORD_KEY,
   ROW_ID,
 } from '../lib/index.js';
 import { skillRegistration, SKILL_NAME } from '../lib/skill.js';
@@ -370,6 +371,37 @@ test('copies legacy credential records into the new scope, once, without deletin
   await tick();
   assert.equal(credentials.records.get('dsh-remote-access/recovery').payload.salt, 'newer');
   assert.ok(!credentials.records.has('dsh-remote-access/nothing'), 'no record is invented');
+});
+
+test('converts the legacy device tokens into the unified record on activation', async () => {
+  // The chain a real upgrade walks: the mobile-console record is copied into the
+  // current scope, then its rows are converted into the v2 authorized-device
+  // record. Both legacy records stay exactly where they were, and a second
+  // activation changes nothing.
+  const legacyTokens = {
+    kind: 'grant',
+    payload: {
+      version: 1,
+      tokens: [{ id: 'abc123', hash: 'f'.repeat(64), label: 'iPhone · Safari', createdAt: 'then', lastUsedAt: 'then', expiresAt: null, days: null }],
+    },
+  };
+  const credentials = credentialStore([['dsh-mobile-console/device-tokens', legacyTokens]]);
+  apply(hostCtx(credentials), undefined);
+  await tick();
+
+  assert.deepEqual(credentials.records.get('dsh-remote-access/device-tokens'), legacyTokens, 'the v1 record is copied, not moved');
+  const v2 = credentials.records.get(DEVICES_V2_RECORD_KEY);
+  assert.equal(v2.payload.version, 2);
+  assert.equal(v2.payload.devices.length, 1);
+  assert.equal(v2.payload.devices[0].id, 'abc123');
+  assert.equal(v2.payload.devices[0].hash, 'f'.repeat(64), 'the fingerprint is carried over');
+  assert.equal(v2.payload.devices[0].name, 'iPhone · Safari');
+  assert.equal(v2.payload.devices[0].source, 'entry-link');
+  assert.deepEqual(credentials.records.get('dsh-mobile-console/device-tokens'), legacyTokens, 'the original is untouched');
+
+  apply(hostCtx(credentials), undefined);
+  await tick();
+  assert.equal(credentials.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 1, 'a second activation adds nothing');
 });
 
 test('a broken credential store cannot stop activation', async () => {
