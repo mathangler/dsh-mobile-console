@@ -1281,20 +1281,142 @@ test('serves the pairing page only for a code that could be real', async () => {
   // With no password armed, `?code=` used to be enough to make the recovery page
   // appear — and that page states whether a password is set.
   const ctx = hostCtx();
-  const valid = (await endpoint(ctx, 'pair-code', { days: 30 })).value.code;
   const shapes = ['', ' ', 'abc', 'ABCDEFG', 'ABCDEFGHI', 'ABCDEFG!', 'ABCDEFG0', 'ABCDEFGL', 'ABCDEFGO'];
   for (const shape of shapes) {
     const page = await route(ctx, `${CHANNEL}/unlock?code=${encodeURIComponent(shape)}`, {}, { method: 'GET' });
     assert.equal(page.status, 404, `code ${JSON.stringify(shape)} is not a page`);
   }
   // 'ABCDEFGH' is in the alphabet and the right length, so it is a *shape* the
-  // page may serve even though no such code was minted: the page is the code
-  // door, and the redemption itself is what rejects it.
+  // page may serve even though no such code was minted: the redemption is what
+  // rejects it, and a refusal shows the page rather than a success.
   const shaped = await route(ctx, `${CHANNEL}/unlock?code=ABCDEFGH`, {}, { method: 'GET' });
-  assert.equal(shaped.status, 200, 'a well-formed code opens the page');
-  const real = await route(ctx, `${CHANNEL}/unlock?code=${encodeURIComponent(valid)}`, {}, { method: 'GET' });
-  assert.equal(real.status, 200, 'a minted code still opens its page');
-  assert.match(String(real.res.body), /'\/unlock\/pair'/, 'and the page can redeem it');
+  assert.equal(shaped.status, 200, 'a well-formed but unknown code shows the page');
+  assert.equal(shaped.res.headers['set-cookie'], undefined, 'and buys no credential');
+  assert.equal((await endpoint(ctx, 'device-list', {})).value.devices.length, 0, 'and authorizes nothing');
+});
+
+test('lands a pairing code in the app without any page script', async () => {
+  const ctx = hostCtx();
+  const mint = async () => (await endpoint(ctx, 'pair-code', { days: 30 })).value.code;
+
+  // (1) A browser navigation: the GET itself redeems and redirects into the app,
+  //     with the device cookie on that same 303. No script runs anywhere.
+  const code = await mint();
+  const navigation = await route(ctx, `${CHANNEL}/unlock?code=${code}`, {}, { method: 'GET', headers: { accept: 'text/html,application/xhtml+xml' } });
+  assert.equal(navigation.status, 303, 'the navigation is redirected, not shown a page');
+  assert.equal(navigation.res.headers.location, 'http://dsh.example.com/', 'straight to the entry URL');
+  const cookies = [].concat(navigation.res.headers['set-cookie'] ?? []).map(String);
+  assert.ok(cookies.some((value) => value.startsWith('mc-device=')), 'and the device cookie rides on the redirect');
+  assert.equal((await endpoint(ctx, 'device-list', {})).value.devices.filter((row) => row.source === 'device-code').length, 1, 'one device was authorized');
+
+  // That cookie is what the root gate turns into a session on the next request.
+  const deviceCookie = cookies.find((value) => value.startsWith('mc-device=')).split(';')[0];
+  const landed = fakeResponse();
+  await ctx.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: { host: 'dsh.example.com', cookie: deviceCookie }, remoteAddress: '203.0.113.9' }),
+    landed,
+  );
+  assert.equal(landed.statusCode, 303, 'and the gate sends it into the app');
+  assert.equal(landed.headers.location, '/', 'with no token in the URL');
+  assert.ok(String([].concat(landed.headers['set-cookie']).join(';')).includes('dsh-session='), 'a session cookie is minted server-side');
+
+  // (2) The page's own fetch asks for JSON and gets exactly what it renders.
+  const pageCode = await mint();
+  const asJson = await route(ctx, `${CHANNEL}/unlock/pair`, { code: pageCode }, { method: 'POST', headers: { accept: 'application/json' } });
+  assert.equal(asJson.ok, true, JSON.stringify(asJson.error));
+  assert.equal(typeof asJson.value.url, 'string');
+  assert.ok(Number.isInteger(asJson.value.qr?.size), 'with the QR the page shows');
+  assert.equal(asJson.res.headers.location, undefined, 'never both shapes in one answer');
+
+  // (3) A form-shaped POST from a browser is landed the same way as the GET.
+  const formCode = await mint();
+  const asHtml = await route(ctx, `${CHANNEL}/unlock/pair`, { code: formCode }, { method: 'POST', headers: { accept: 'text/html' } });
+  assert.equal(asHtml.status, 303, 'an HTML POST is redirected');
+  assert.equal(asHtml.res.headers.location, 'http://dsh.example.com/');
+  assert.ok([].concat(asHtml.res.headers['set-cookie'] ?? []).map(String).some((value) => value.startsWith('mc-device=')));
+
+  // (4) A script with no Accept at all keeps the JSON it has always had, and can
+  //     ask for either shape explicitly.
+  const scriptCode = await mint();
+  const script = await route(ctx, `${CHANNEL}/unlock/pair`, { code: scriptCode }, { method: 'POST', headers: { accept: '*/*' } });
+  assert.equal(script.ok, true, 'a plain client still gets JSON');
+  const forcedJson = await route(ctx, `${CHANNEL}/unlock?code=${await mint()}&format=json`, {}, { method: 'GET', headers: { accept: 'text/html' } });
+  assert.equal(forcedJson.ok, true, 'and ?format=json forces the JSON answer');
+  const forcedPage = await route(ctx, `${CHANNEL}/unlock?code=${await mint()}&format=page`, {}, { method: 'GET', headers: { accept: 'text/html' } });
+  assert.equal(forcedPage.status, 200, 'while ?format=page asks for the page');
+  assert.match(String(forcedPage.res.body), /'\/unlock\/pair'/, 'and that page can still redeem the code itself');
+
+  // (5) A second redemption is refused in both shapes.
+  const once = await mint();
+  assert.equal((await route(ctx, `${CHANNEL}/unlock?code=${once}`, {}, { method: 'GET', headers: { accept: 'text/html' } })).status, 303);
+  const again = await route(ctx, `${CHANNEL}/unlock/pair`, { code: once }, { method: 'POST', headers: { accept: 'application/json' } });
+  assert.equal(again.ok, false, 'the code is spent for the JSON shape too');
+  assert.equal(again.error.code, 'remote-access/pair-denied');
+  const againHtml = await route(ctx, `${CHANNEL}/unlock/pair`, { code: once }, { method: 'POST', headers: { accept: 'text/html' } });
+  assert.notEqual(againHtml.status, 303, 'and for the HTML shape');
+
+  // (6) A prefetch never burns a code: a link preview must not spend it.
+  const previewed = await mint();
+  const preview = await route(ctx, `${CHANNEL}/unlock?code=${previewed}`, {}, { method: 'GET', headers: { accept: 'text/html', purpose: 'prefetch' } });
+  assert.equal(preview.status, 200, 'a prefetch gets the page, not the landing');
+  assert.equal(preview.res.headers['set-cookie'], undefined, 'and no credential');
+  assert.equal((await route(ctx, `${CHANNEL}/unlock?code=${previewed}`, {}, { method: 'GET', headers: { accept: 'text/html' } })).status, 303, 'the code is still good for the person');
+});
+
+test('offers a plain anchor into the app, and asks for JSON itself', () => {
+  const html = unlockPageHtml({
+    prefix: CHANNEL,
+    configured: true,
+    title: 't',
+    subtitle: 's',
+    passwordLabel: 'p',
+    buttonLabel: 'b',
+    wrongLabel: 'w',
+    throttledLabel: 'th',
+    failedLabel: 'f',
+    missingLabel: 'm',
+    successLabel: 'ok',
+    openLabel: 'Open the app',
+    qrLabel: 'qr',
+  });
+  const script = html.split('<script>')[1].split('</script>')[0];
+  // The way in that needs nothing from the page: an ordinary anchor, built from
+  // the URL the host returned.
+  assert.match(html, /<a id="open" href="#" role="button"><\/a>/, 'the page carries a plain link');
+  assert.match(script, /open\.href = entry\.url/, 'pointed at the entry URL');
+  assert.match(script, /open\.textContent = TEXT\.openLabel/, 'and labelled from the host strings');
+  // Its own fetch must say JSON: the default Accept would get the redirect.
+  assert.match(script, /headers: \{ 'content-type': 'application\/json', accept: 'application\/json' \}/, 'the page asks for the JSON answer');
+  assert.doesNotThrow(() => new Function(script), 'and the script parses');
+});
+
+test('adds Secure only when the browser really is on https', async () => {
+  // Wrong in the unsafe direction drops the cookie: a `Secure` cookie delivered
+  // over http is discarded, while one without `Secure` is accepted over https.
+  const navigate = async (ctx, headers, remoteAddress = '203.0.113.9') => {
+    const code = (await endpoint(ctx, 'pair-code', { days: 30 })).value.code;
+    return route(ctx, `${CHANNEL}/unlock?code=${code}`, {}, { method: 'GET', headers: { accept: 'text/html', ...headers }, remoteAddress });
+  };
+  const secureOf = (res) => [].concat(res.res.headers['set-cookie'] ?? []).map(String).join('; ').includes('Secure');
+
+  // A LAN visit, tunnel or not: http, so no Secure — the cookie survives.
+  const lan = hostCtx({ editor: webServerRows('192.168.31.186'), port: 3080 });
+  assert.equal(secureOf(await navigate(lan, { host: '192.168.31.186:3080' })), false, 'a LAN http visit gets no Secure');
+
+  // The local proxy says the browser is on https: that is the one caller allowed
+  // to speak for the client, because it is the one terminating TLS.
+  const proxied = hostCtx();
+  assert.equal(secureOf(await navigate(proxied, { host: 'dsh.example.com', 'x-forwarded-proto': 'https' }, '127.0.0.1')), true, 'the loopback proxy may say https');
+  // The same header from anywhere else changes nothing.
+  const spoofed = hostCtx();
+  assert.equal(secureOf(await navigate(spoofed, { host: 'dsh.example.com', 'x-forwarded-proto': 'https' })), false, 'a stranger may not');
+
+  // The request arrived on the advertised public authority: https by config.
+  const advertised = hostCtx({ config: { publicUrl: 'https://dsh-win.mathangler.site/' } });
+  assert.equal(secureOf(await navigate(advertised, { host: 'dsh-win.mathangler.site' })), true, 'the advertised tunnel authority is https');
+  // But the same instance visited over its LAN address is still http.
+  const advertisedLan = hostCtx({ config: { publicUrl: 'https://dsh-win.mathangler.site/' }, editor: webServerRows('192.168.31.186'), port: 3080 });
+  assert.equal(secureOf(await navigate(advertisedLan, { host: '192.168.31.186:3080' })), false, 'and the LAN address of that instance is not');
 });
 
 test('decides Secure from configuration, not from a header a caller sets', async () => {
