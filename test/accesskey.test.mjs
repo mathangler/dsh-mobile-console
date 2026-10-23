@@ -1245,7 +1245,9 @@ test('lets exactly one of many concurrent pairing redemptions win', async () => 
   assert.equal(devices.length, 1, 'one device was authorized');
   assert.equal(devices[0].source, 'device-code');
   const codes = ctx.records.get('dsh-remote-access/pair-codes')?.payload?.codes ?? [];
-  assert.equal(codes.length, 0, 'and the code is gone');
+  assert.equal(codes.length, 1, 'the code row is kept, so its fate stays readable');
+  assert.equal(typeof codes[0].usedAt, 'string', 'and it is marked used');
+  assert.equal((await endpoint(ctx, 'pair-code-status', { id: codes[0].id })).value.state, 'used');
 });
 
 test('refuses a cross-site POST at every public door', async () => {
@@ -1341,6 +1343,211 @@ test('does not let failed proofs lock the owner out of the door', async () => {
   assert.equal(owner.ok, true, JSON.stringify(owner.error));
 });
 
+test('switches the two channels independently, and restores without re-pairing', async () => {
+  const ctx = hostCtx();
+  const visit = async (token, options = {}) => {
+    const res = fakeResponse();
+    await ctx.routes.exact.get('/')(
+      fakeRequest(undefined, {
+        method: 'GET',
+        url: `/?token=${token}`,
+        headers: { host: 'dsh.example.com', accept: 'application/json', ...(options.headers ?? {}) },
+        remoteAddress: options.remoteAddress ?? '203.0.113.9',
+      }),
+      res,
+    );
+    return res;
+  };
+
+  // Both channels default to on.
+  assert.deepEqual((await endpoint(ctx, 'access-policy', {})).value, { temporaryAccess: true, deviceAccess: true });
+  assert.deepEqual((await endpoint(ctx, 'state', {})).value.accessPolicy, { temporaryAccess: true, deviceAccess: true }, 'state carries it');
+  assert.deepEqual((await endpoint(ctx, 'mode-status', {})).value.accessPolicy, { temporaryAccess: true, deviceAccess: true }, 'mode-status carries it');
+
+  // A temporary link and a durable device, both live.
+  const key = await endpoint(ctx, 'key-create', { name: 'Phone' });
+  const link = (await endpoint(ctx, 'token', { key: key.value.key })).value;
+  const linkToken = new URL(link.url).searchParams.get('token');
+  const code = await endpoint(ctx, 'pair-code', { days: null });
+  const paired = await route(ctx, `${CHANNEL}/unlock/pair`, { code: code.value.code }, { method: 'POST' });
+  assert.equal(paired.ok, true, JSON.stringify(paired.error));
+  const deviceCookie = [].concat(paired.res.headers['set-cookie'] ?? []).map(String).find((value) => value.startsWith('mc-device=')).split(';')[0];
+  const deviceRow = (await endpoint(ctx, 'device-list', {})).value.devices.find((row) => row.source === 'device-code');
+  const durableCookie = { cookie: deviceCookie };
+  const rowsBefore = ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length;
+
+  // ── temporary off: the link is refused, nothing is deleted, the device still works
+  const offTemporary = await endpoint(ctx, 'set-access-policy', { temporary: false });
+  assert.equal(offTemporary.ok, true, JSON.stringify(offTemporary.error));
+  assert.deepEqual(offTemporary.value, { temporaryAccess: false, deviceAccess: true, changed: { temporaryAccess: false } });
+  const refusedLink = await visit(linkToken);
+  assert.equal(refusedLink.statusCode, 403, 'the one-time link is refused while its channel is off');
+  assert.equal(JSON.parse(String(refusedLink.body)).error.code, 'remote-access/temporary-disabled');
+  assert.match(JSON.parse(String(refusedLink.body)).error.message, /temporary links are switched off/);
+  assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, rowsBefore, 'and nothing was deleted');
+  const stillDevice = fakeResponse();
+  await ctx.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: { host: 'dsh.example.com', ...durableCookie }, remoteAddress: '203.0.113.9' }),
+    stillDevice,
+  );
+  assert.equal(stillDevice.statusCode, 303, 'the durable device is unaffected by the temporary channel');
+  // Minting through the panel and the public door is refused too.
+  assert.equal((await endpoint(ctx, 'device-link', { id: deviceRow.id })).error.code, 'remote-access/temporary-disabled');
+  const keyDoor = await route(ctx, `${CHANNEL}/token`, { key: key.value.key }, { method: 'POST' });
+  assert.equal(keyDoor.status, 403, 'the access-key door is refused');
+  assert.equal(keyDoor.error.code, 'remote-access/temporary-disabled');
+
+  // ── back on: the very same link works again, with no new row
+  const onAgain = await endpoint(ctx, 'set-access-policy', { temporary: true });
+  assert.deepEqual(onAgain.value, { temporaryAccess: true, deviceAccess: true, changed: { temporaryAccess: true } });
+  assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, rowsBefore, 'the switch itself deleted nothing');
+  assert.equal((await visit(linkToken)).statusCode, 303, 'the same link works again, without re-minting');
+  assert.equal(
+    ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length,
+    rowsBefore - 1,
+    'and then it burns itself by being used, as a one-time link does',
+  );
+
+  // ── device off: the durable credential is refused, the temporary channel works
+  const offDevice = await endpoint(ctx, 'set-access-policy', { device: false });
+  assert.deepEqual(offDevice.value, { temporaryAccess: true, deviceAccess: false, changed: { deviceAccess: false } });
+  const refusedDevice = fakeResponse();
+  await ctx.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: { host: 'dsh.example.com', accept: 'application/json', ...durableCookie }, remoteAddress: '203.0.113.9' }),
+    refusedDevice,
+  );
+  assert.equal(refusedDevice.statusCode, 403, 'the paired device is refused while its channel is off');
+  assert.equal(JSON.parse(String(refusedDevice.body)).error.code, 'remote-access/device-disabled');
+  // A navigation gets the page instead, carrying the same reason in words.
+  const refusedNavigation = fakeResponse();
+  await ctx.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: { host: 'dsh.example.com', accept: 'text/html', ...durableCookie }, remoteAddress: '203.0.113.9' }),
+    refusedNavigation,
+  );
+  assert.equal(refusedNavigation.statusCode, 200, 'a navigation gets the page');
+  assert.match(String(refusedNavigation.body), /<!doctype html>/);
+  assert.match(String(refusedNavigation.body), /authorized devices are switched off/, 'with the reason readable in it');
+  assert.ok(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.some((row) => row.id === deviceRow.id), 'the row survives');
+  assert.equal((await endpoint(ctx, 'pair-code', { days: null })).error.code, 'remote-access/device-disabled', 'minting a code is refused');
+  const pairingDoor = await route(ctx, `${CHANNEL}/unlock/pair`, { code: 'ABCDEFGH' }, { method: 'POST', headers: { accept: 'application/json' } });
+  assert.equal(pairingDoor.status, 403, 'and so is the pairing door');
+  assert.equal(pairingDoor.error.code, 'remote-access/device-disabled');
+  const pairingPage = await route(ctx, `${CHANNEL}/unlock?code=ABCDEFGH`, {}, { method: 'GET', headers: { accept: 'text/html' } });
+  assert.equal(pairingPage.status, 200, 'a navigation to a code gets the page instead');
+  assert.match(String(pairingPage.res.body), /authorized devices are switched off/, 'with the reason readable in it');
+
+  // ── back on: the same paired device gets in again, unchanged
+  await endpoint(ctx, 'set-access-policy', { device: true });
+  const deviceAgain = fakeResponse();
+  await ctx.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: { host: 'dsh.example.com', ...durableCookie }, remoteAddress: '203.0.113.9' }),
+    deviceAgain,
+  );
+  assert.equal(deviceAgain.statusCode, 303, 'the same device cookie works again, with no re-pairing');
+
+  // Idempotent, and a bare call changes nothing.
+  const repeat = await endpoint(ctx, 'set-access-policy', {});
+  assert.deepEqual(repeat.value, { temporaryAccess: true, deviceAccess: true, changed: {} }, 'a no-op reports no change');
+});
+
+test('treats an absent or malformed policy record as both channels on', async () => {
+  // Never let a policy the plugin cannot read be the reason nobody gets in.
+  const shapes = [
+    undefined,
+    { kind: 'grant', payload: null },
+    { kind: 'grant', payload: { version: 1 } },
+    { kind: 'grant', payload: { temporaryAccess: 'no', deviceAccess: 0 } },
+    { kind: 'grant', payload: 'nonsense' },
+  ];
+  for (const record of shapes) {
+    const ctx = hostCtx();
+    if (record !== undefined) ctx.records.set('dsh-remote-access/access-policy', record);
+    const policy = await endpoint(ctx, 'access-policy', {});
+    assert.deepEqual(policy.value, { temporaryAccess: true, deviceAccess: true }, `reads as both on for ${JSON.stringify(record)}`);
+    const key = await endpoint(ctx, 'key-create', { name: 'Phone' });
+    const link = (await endpoint(ctx, 'token', { key: key.value.key })).value;
+    const res = fakeResponse();
+    await ctx.routes.exact.get('/')(
+      fakeRequest(undefined, {
+        method: 'GET',
+        url: `/?token=${new URL(link.url).searchParams.get('token')}`,
+        headers: { host: 'dsh.example.com', accept: 'application/json' },
+        remoteAddress: '203.0.113.9',
+      }),
+      res,
+    );
+    assert.equal(res.statusCode, 303, 'and a link still redeems');
+  }
+});
+
+test('tells a used pairing code from an expired or unknown one', async () => {
+  const ctx = hostCtx();
+
+  // Ready: the panel gets an id back with the code.
+  const minted = await endpoint(ctx, 'pair-code', { days: 30 });
+  const id = minted.value.id;
+  assert.equal(typeof id, 'string', 'pair-code answers the row id');
+  const ready = (await endpoint(ctx, 'pair-code-status', { id })).value;
+  assert.equal(ready.state, 'ready', 'a fresh code is ready');
+  assert.equal(ready.expiresAt, minted.value.expiresAt, 'and reports its expiry');
+
+  // Redeemed once: used, with the instant, and a second redemption is refused.
+  const first = await route(ctx, `${CHANNEL}/unlock/pair`, { code: minted.value.code }, { method: 'POST' });
+  assert.equal(first.ok, true, JSON.stringify(first.error));
+  const used = (await endpoint(ctx, 'pair-code-status', { id })).value;
+  assert.equal(used.state, 'used', 'and then it reads used');
+  assert.equal(typeof used.usedAt, 'string', 'with the instant it was used');
+  assert.ok(Number.isFinite(Date.parse(used.usedAt)), 'which is a real timestamp');
+  const second = await route(ctx, `${CHANNEL}/unlock/pair`, { code: minted.value.code }, { method: 'POST' });
+  assert.equal(second.ok, false, 'the second redemption is refused');
+  assert.equal(second.error.code, 'remote-access/pair-denied');
+  assert.equal((await endpoint(ctx, 'pair-code-status', { id })).value.usedAt, used.usedAt, 'and the mark does not move');
+
+  // Expired: still distinguishable, because the row is still there.
+  const stale = await endpoint(ctx, 'pair-code', { days: 30 });
+  ctx.records.get('dsh-remote-access/pair-codes').payload.codes.find((row) => row.id === stale.value.id).expiresAt = Date.now() - 1000;
+  const expired = (await endpoint(ctx, 'pair-code-status', { id: stale.value.id })).value;
+  assert.equal(expired.state, 'expired', 'an expired unused code reads expired');
+  assert.equal(expired.usedAt, undefined, 'and is not called used');
+  const refused = await route(ctx, `${CHANNEL}/unlock/pair`, { code: stale.value.code }, { method: 'POST' });
+  assert.equal(refused.ok, false, 'and it cannot be redeemed');
+  assert.equal((await endpoint(ctx, 'pair-code-status', { id: stale.value.id })).value.state, 'expired', 'and stays expired, not used');
+
+  // Unknown: a bogus id is an answer, never an error.
+  const unknown = await endpoint(ctx, 'pair-code-status', { id: 'nope' });
+  assert.equal(unknown.ok, true, 'an unknown id is not an error');
+  assert.equal(unknown.status, 200);
+  assert.deepEqual(unknown.value, { state: 'unknown' });
+  assert.equal((await endpoint(ctx, 'pair-code-status', {})).value.state, 'unknown', 'and neither is a missing id');
+
+  // The mark lives in the record, not in memory: a fresh context reads it too.
+  const record = ctx.records.get('dsh-remote-access/pair-codes');
+  const reopened = hostCtx({ records: new Map([['dsh-remote-access/pair-codes', record]]) });
+  assert.equal((await endpoint(reopened, 'pair-code-status', { id })).value.state, 'used', 'the mark survives a new context');
+});
+
+test('prunes old used pairing codes without resurrecting anything', async () => {
+  const ctx = hostCtx();
+  const codes = () => ctx.records.get('dsh-remote-access/pair-codes')?.payload?.codes ?? [];
+
+  // Twenty-five codes, each really redeemed, so each one is marked used.
+  const usedIds = [];
+  for (let index = 0; index < 25; index += 1) {
+    const minted = await endpoint(ctx, 'pair-code', { days: 30 });
+    usedIds.push(minted.value.id);
+    const answer = await route(ctx, `${CHANNEL}/unlock/pair`, { code: minted.value.code }, { method: 'POST' });
+    assert.equal(answer.ok, true, `redemption ${index} works`);
+  }
+  assert.ok(codes().length <= 20, `the record is bounded, got ${codes().length}`);
+  assert.equal((await endpoint(ctx, 'pair-code-status', { id: usedIds[0] })).value.state, 'unknown', 'a pruned code reads unknown');
+  assert.equal((await endpoint(ctx, 'pair-code-status', { id: usedIds[24] })).value.state, 'used', 'the newest used one is still readable');
+  const kept = codes().filter((row) => typeof row.usedAt === 'string');
+  assert.ok(kept.length > 0 && kept.length <= 20, 'used rows are kept while they are recent, and only a handful');
+
+  // Pruning must not resurrect: a pruned code is still refused.
+  const fresh = await endpoint(ctx, 'pair-code', { days: 30 });
+  assert.equal((await endpoint(ctx, 'pair-code-status', { id: fresh.value.id })).value.state, 'ready', 'a new code still reads ready');
+});
 test('revoke-temporary clears exactly the temporary rows', async () => {
   const ctx = hostCtx();
 
@@ -1868,14 +2075,76 @@ test('mints a one-time link for an existing device without touching it', async (
   assert.match(missing.error.message, /no authorized device with id "nope"/);
   assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 1, 'a failed link adds no row');
 
-  // And it is rate limited like the other mint operations: the mint above was
-  // the first of five, so four more are allowed and the sixth is refused.
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    assert.equal((await endpoint(ctx, 'device-link', { id: source.id })).ok, true, `mint ${attempt + 2}`);
+  // The panel's own budget is roomy: a person clicking through the panel is not
+  // fighting their own tool. Two more mints go through without complaint.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.equal((await endpoint(ctx, 'device-link', { id: source.id })).ok, true, `panel mint ${attempt + 2}`);
   }
-  const throttled = await endpoint(ctx, 'device-link', { id: source.id });
-  assert.equal(throttled.ok, false);
-  assert.match(throttled.error.message, /too many links/);
+});
+
+test('gives the panel a bigger budget than the public doors, and says how long', async () => {
+  const ctx = hostCtx();
+  const created = await endpoint(ctx, 'key-create', { name: 'Phone' });
+  await endpoint(ctx, 'token', { key: created.value.key });
+  const device = (await endpoint(ctx, 'device-list', {})).value.devices[0];
+
+  // One client, and the panel budget is shared by the panel's mint actions: the
+  // `key-create` above spent one of the thirty, so twenty-nine links fit.
+  let minted = 0;
+  let refusal;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const answer = await endpoint(ctx, 'device-link', { id: device.id });
+    if (answer.ok === true) {
+      minted += 1;
+      continue;
+    }
+    refusal = answer;
+    break;
+  }
+  assert.equal(minted + 1, 30, 'the panel budget is thirty per client, shared across its mint actions');
+  assert.equal(refusal.ok, false, 'and then it refuses');
+  assert.equal(refusal.error.code, 'remote-access/panel-throttled', 'with a code the panel can branch on');
+  assert.match(refusal.error.message, /too many link requests just now/, 'worded so it cannot be read as a claim about how many links exist');
+  assert.ok(!/have been minted/.test(refusal.error.message), 'and never as a count of outstanding links');
+  const retryAfter = refusal.error.details?.retryAfter;
+  assert.ok(Number.isInteger(retryAfter) && retryAfter > 0 && retryAfter <= 900, `retryAfter is a sane countdown, got ${retryAfter}`);
+
+  // Counted per client, not per row: another client has its own budget, and a
+  // different row does not inherit the first row's spending.
+  const other = await endpoint(ctx, 'device-link', { id: device.id }, { remoteAddress: '198.51.100.30' });
+  assert.equal(other.ok, true, 'a second client still has its own budget');
+
+  // The public door keeps the strict five: that is where guessing is stopped.
+  const publicCtx = hostCtx();
+  await endpoint(publicCtx, 'key-create', { name: 'Phone' });
+  let accepted = 0;
+  let publicRefusal;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const answer = await endpoint(publicCtx, 'token', { key: 'dra_' + 'a'.repeat(43) });
+    if (answer.status === 200 && answer.ok === false) accepted += 1;
+    else {
+      publicRefusal = answer;
+      break;
+    }
+  }
+  assert.equal(accepted, 5, 'the public key door allows five attempts');
+  assert.equal(publicRefusal.status, 429, 'and then answers 429');
+  assert.match(String(publicRefusal.error?.message ?? ''), /too many attempts/);
+
+  // The pairing door is public too, and shares the strict budget.
+  const pairCtx = hostCtx();
+  let pairs = 0;
+  let pairRefusal;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const answer = await route(pairCtx, `${CHANNEL}/unlock/pair`, { code: 'ABCDEFGH' }, { method: 'POST' });
+    if (answer.status === 200 && answer.ok === false) pairs += 1;
+    else {
+      pairRefusal = answer;
+      break;
+    }
+  }
+  assert.equal(pairs, 5, 'the public pairing door allows five attempts');
+  assert.equal(pairRefusal.status, 429, 'and then answers 429');
 });
 
 test('a device link dies with the device it was minted for', async () => {
