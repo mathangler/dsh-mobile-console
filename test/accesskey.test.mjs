@@ -430,6 +430,26 @@ test('gives every record a fresh id that is not part of a fingerprint', () => {
 // the developer's machine. Tests that care about the reported port set it.
 function hostCtx({ records = new Map(), secrets = new Map(), config, editor, connection, port = 9, documentPath } = {}) {
   const routes = { prefix: [], exact: new Map() };
+  // The real store refuses a payload it cannot spell, with its own error, *at
+  // write time* — so a double that accepts anything hides exactly the bug class
+  // that killed `device-link`. These are the store's rules, verbatim.
+  const assertStorable = (where, value, seen = new Set()) => {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+    if (typeof value === 'number') {
+      if (Number.isFinite(value)) return;
+      throw new TypeError(`credentials-local: ${where} holds a non-finite number`);
+    }
+    if (typeof value === 'object') {
+      if (seen.has(value)) throw new TypeError(`credentials-local: ${where} is cyclic`);
+      if (Object.getPrototypeOf(value) === Object.prototype || Array.isArray(value)) {
+        seen.add(value);
+        for (const nested of Object.values(value)) assertStorable(where, nested, seen);
+        seen.delete(value);
+        return;
+      }
+    }
+    throw new TypeError(`credentials-local: ${where} holds a value JSON cannot represent`);
+  };
   // Updates to one key are serialized, like the real credential store's atomic
   // update: a double that let two `modifyRecord` callbacks read the same value
   // would make a compare-and-swap look unnecessary.
@@ -440,7 +460,9 @@ function hostCtx({ records = new Map(), secrets = new Map(), config, editor, con
       const previous = chains.get(key) ?? Promise.resolve();
       const next = previous.then(async () => {
         const value = await mutate(records.get(key));
-        if (value !== undefined) records.set(key, value);
+        if (value === undefined) return value;
+        if (value.kind === 'grant') assertStorable(`record "${key}" payload`, value.payload);
+        records.set(key, value);
         return value;
       });
       chains.set(key, next.then(() => undefined, () => undefined));
@@ -524,6 +546,8 @@ function hostCtx({ records = new Map(), secrets = new Map(), config, editor, con
     },
   };
   apply(ctx, config);
+  // Exposed so a test can make the store refuse, or inspect what was written.
+  ctx.credentials = credentials;
   return ctx;
 }
 
@@ -551,6 +575,13 @@ function fakeRequest(body, { url = '/', remoteAddress = '203.0.113.9', headers =
       target.end();
       return target;
     },
+    // The forwarder watches for a client that goes away.
+    on() {
+      return this;
+    },
+    once() {
+      return this;
+    },
     [Symbol.asyncIterator]: () => ({
       next: async () => (index < chunks.length ? { value: chunks[index++], done: false } : { done: true }),
     }),
@@ -567,9 +598,13 @@ async function waitFor(predicate, steps = 200) {
 }
 
 function fakeResponse() {
-  return {
+  const listeners = new Map();
+  const chunks = [];
+  const res = {
     statusCode: 200,
     headers: {},
+    writableEnded: false,
+    destroyed: false,
     setHeader(name, value) {
       this.headers[name.toLowerCase()] = value;
     },
@@ -577,10 +612,39 @@ function fakeResponse() {
       this.statusCode = status;
       Object.assign(this.headers, headers);
     },
+    // Enough of a writable stream for `answer.pipe(res)` to drive it.
+    write(chunk) {
+      if (chunk !== undefined) chunks.push(Buffer.from(String(chunk)));
+      return true;
+    },
     end(body) {
-      this.body = body;
+      if (body !== undefined) chunks.push(Buffer.from(String(body)));
+      this.body = chunks.length === 0 ? undefined : Buffer.concat(chunks).toString('utf8');
+      this.writableEnded = true;
+    },
+    destroy() {
+      this.destroyed = true;
+    },
+    // The forwarder listens for the client leaving, and for a deadline; a test
+    // drives that by emitting `close` itself.
+    on(name, listener) {
+      const list = listeners.get(name) ?? [];
+      list.push(listener);
+      listeners.set(name, list);
+      return this;
+    },
+    once(name, listener) {
+      return this.on(name, listener);
+    },
+    listenerCount(name) {
+      return (listeners.get(name) ?? []).length;
+    },
+    emit(name, ...args) {
+      for (const listener of listeners.get(name) ?? []) listener(...args);
+      return this;
     },
   };
+  return res;
 }
 
 /** POST one JSON endpoint and return `{ status, value, error }`. */
@@ -1277,6 +1341,233 @@ test('does not let failed proofs lock the owner out of the door', async () => {
   assert.equal(owner.ok, true, JSON.stringify(owner.error));
 });
 
+test('revoke-temporary clears exactly the temporary rows', async () => {
+  const ctx = hostCtx();
+
+  // Two durable devices: an access key redeemed to a *durable* device row, and a
+  // pairing code redeemed the same way. These must survive the broom.
+  const durableKey = await endpoint(ctx, 'key-create', { name: 'Laptop' });
+  const durableToken = (await endpoint(ctx, 'token', { key: durableKey.value.key })).value;
+  const durableJar = {};
+  // Redeem the one-time link: that row is temporary and *is* one of the ones the
+  // broom takes, so the durable device it authorizes is what we then keep.
+  await ctx.routes.exact.get('/')(
+    fakeRequest(undefined, {
+      method: 'GET',
+      url: `/?token=${new URL(durableToken.url).searchParams.get('token')}`,
+      headers: { host: 'dsh.example.com', cookie: 'mc-device=' + new URL(durableToken.url).searchParams.get('token') },
+      remoteAddress: '203.0.113.9',
+    }),
+    fakeResponse(),
+  );
+  const code = await endpoint(ctx, 'pair-code', { days: null });
+  const paired = await route(ctx, `${CHANNEL}/unlock/pair`, { code: code.value.code }, { method: 'POST' });
+  assert.equal(paired.ok, true, JSON.stringify(paired.error));
+  const durableCookie = [].concat(paired.res.headers['set-cookie'] ?? []).map(String).find((value) => value.startsWith('mc-device='));
+  assert.ok(durableCookie !== undefined, 'the durable device holds its credential');
+  const deviceCookie = durableCookie.split(';')[0];
+
+  // Now some temporary rows: an outstanding one-time link, and a link minted for
+  // that durable device (which is temporary and carries a parentId).
+  const durable = (await endpoint(ctx, 'device-list', {})).value.devices.find((row) => row.source === 'device-code');
+  assert.ok(durable !== undefined, 'the durable device is listed');
+  const link = await endpoint(ctx, 'token', { key: durableKey.value.key });
+  assert.equal(link.ok, true, JSON.stringify(link.error));
+  const child = await endpoint(ctx, 'device-link', { id: durable.id });
+  assert.equal(child.ok, true, JSON.stringify(child.error));
+
+  const before = (await endpoint(ctx, 'device-list', {})).value.devices;
+  const temporaryIds = before.filter((row) => row.temporary === true).map((row) => row.id);
+  const durableIds = before.filter((row) => row.temporary !== true).map((row) => row.id);
+  assert.ok(temporaryIds.length >= 2, `expected temporary rows to clear, got ${temporaryIds.length}`);
+  assert.ok(durableIds.length >= 1, 'and at least one durable row to keep');
+
+  const swept = await endpoint(ctx, 'revoke-temporary', {});
+  assert.equal(swept.ok, true, JSON.stringify(swept.error));
+  assert.equal(swept.value.revoked, temporaryIds.length, 'the count is exactly the temporary rows');
+
+  const after = (await endpoint(ctx, 'device-list', {})).value.devices;
+  assert.equal(after.length, durableIds.length, 'only durable rows are left');
+  for (const id of durableIds) assert.ok(after.some((row) => row.id === id), `durable ${id} survived`);
+
+  // The durable device's credential still works: the gate sends it into the app.
+  const gate = fakeResponse();
+  await ctx.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: { host: 'dsh.example.com', cookie: deviceCookie }, remoteAddress: '203.0.113.9' }),
+    gate,
+  );
+  assert.equal(gate.statusCode, 303, 'the durable device still gets in');
+
+  // The swept links are dead, and a repeat call is a no-op.
+  const sweptToken = new URL(link.value.url).searchParams.get('token');
+  const refused = fakeResponse();
+  await ctx.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: `/?token=${sweptToken}`, headers: { host: 'dsh.example.com' }, remoteAddress: '203.0.113.9' }),
+    refused,
+  );
+  assert.notEqual(refused.statusCode, 303, 'a swept link no longer opens anything');
+  assert.equal((await endpoint(ctx, 'revoke-temporary', {})).value.revoked, 0, 'a repeat call revokes nothing');
+});
+
+test('every credential payload survives a JSON round trip', async () => {
+  // The store rejects a payload it cannot spell — `undefined` in a row, a Date, a
+  // class instance — and it rejects it *at write time*, so the request that
+  // happened to be writing dies with the store's error. This asserts the property
+  // directly, for every record shape the plugin builds, so the class cannot come
+  // back a third time.
+  const roundTrips = (label, payload) => {
+    assert.ok(payload !== undefined, `${label}: something was written`);
+    assert.deepEqual(JSON.parse(JSON.stringify(payload)), payload, `${label}: round-trips losslessly`);
+  };
+  const ctx = hostCtx();
+
+  const key = await endpoint(ctx, 'key-create', { name: 'Phone', days: 30 });
+  roundTrips('access-keys', ctx.records.get(ACCESS_KEYS_RECORD_KEY).payload);
+
+  // A one-time link row, and the device it authorizes.
+  await endpoint(ctx, 'token', { key: key.value.key });
+  roundTrips('devices-v2 (access-key link)', ctx.records.get(DEVICES_V2_RECORD_KEY).payload);
+  const device = (await endpoint(ctx, 'device-list', {})).value.devices.find((row) => row.source === 'access-key');
+
+  // A link row *with* `parentId`, which is the field the cascade fix added.
+  const linked = await endpoint(ctx, 'device-link', { id: device.id });
+  assert.equal(linked.ok, true, JSON.stringify(linked.error));
+  roundTrips('devices-v2 (device-link, with parentId)', ctx.records.get(DEVICES_V2_RECORD_KEY).payload);
+
+  // A pairing code, and the durable device row redeeming it produces.
+  const code = await endpoint(ctx, 'pair-code', { days: null });
+  roundTrips('pair-codes', ctx.records.get('dsh-remote-access/pair-codes').payload);
+  await route(ctx, `${CHANNEL}/unlock/pair`, { code: code.value.code }, { method: 'POST' });
+  roundTrips('devices-v2 (device-code)', ctx.records.get(DEVICES_V2_RECORD_KEY).payload);
+
+  // A device the gate has touched, so `lastUsedAt`/`lastUsedIp` are written too.
+  const cookie = (await endpoint(ctx, 'device-list', {})).value.devices.find((row) => row.source === 'device-code');
+  const used = await endpoint(ctx, 'device-rename', { id: cookie.id, name: 'Renamed' });
+  assert.equal(used.ok, true, JSON.stringify(used.error));
+  roundTrips('devices-v2 (renamed)', ctx.records.get(DEVICES_V2_RECORD_KEY).payload);
+
+  // The password record, and the legacy activity record a device row passes
+  // through on the migration path.
+  const armed = hostCtx();
+  armed.records.set('dsh-remote-access/recovery', {
+    kind: 'grant',
+    payload: { version: 1, key: 'k', salt: 'c2FsdA==', secret: 'sec', iterations: 1000 },
+  });
+  roundTrips('recovery', armed.records.get('dsh-remote-access/recovery').payload);
+  roundTrips('devices', ctx.records.get(DEVICE_RECORD_KEY)?.payload ?? { version: 1, devices: [] });
+});
+
+test('reports a structured refusal when a write is rejected', async () => {
+  // The store refusing a payload must not take the request down with its own
+  // error: the panel needs a code it can branch on.
+  const failing = hostCtx();
+  failing.records.set(DEVICES_V2_RECORD_KEY, {
+    kind: 'grant',
+    payload: { version: 2, devices: [{ id: 'row-1', name: 'Phone', source: 'device-code', temporary: false, createdAt: new Date().toISOString(), lastUsedAt: null, expiresAt: null, days: null, hash: 'a'.repeat(64) }] },
+  });
+  const original = failing.credentials.modifyRecord;
+  failing.credentials.modifyRecord = async (key, mutate) => {
+    if (key === DEVICES_V2_RECORD_KEY) {
+      throw new TypeError('credentials-local: record "dsh-remote-access/devices-v2" payload holds a value JSON cannot represent');
+    }
+    return original(key, mutate);
+  };
+  const answer = await endpoint(failing, 'device-link', { id: 'row-1' });
+  assert.equal(answer.ok, false, 'the endpoint answers a refusal');
+  assert.equal(answer.status, 200, 'and not a 500');
+  assert.match(String(answer.error?.code), /^remote-access\//, 'with a code the panel can branch on');
+  assert.match(String(answer.error?.message), /cannot represent|store/, 'and a message that says what happened');
+});
+
+test('never waits forever on the index forward', async () => {
+  // The defect: a declared `Content-Length` with no body left both ends waiting
+  // for bytes that never came — 300 seconds of nothing, which over a tunnel is a
+  // Cloudflare 502/524 with no log line. Three guards, one assertion each.
+  const http = await import('node:http');
+  const seen = [];
+  const answering = http.createServer((req, res) => {
+    seen.push({ length: req.headers['content-length'], method: req.method });
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end('<html>__DSH_BOOT__</html>');
+  });
+  const silent = http.createServer(() => {});
+  let aborted = 0;
+  let reached;
+  const arrived = new Promise((resolve) => {
+    reached = resolve;
+  });
+  const stalled = http.createServer((req) => {
+    reached();
+    req.on('aborted', () => {
+      aborted += 1;
+    });
+    req.socket.on('close', () => {
+      aborted += 1;
+    });
+  });
+  const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await listen(answering);
+  await listen(silent);
+  await listen(stalled);
+  const stop = async (server) => {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  };
+  const ctxFor = (port, timeoutMs) =>
+    hostCtx({ port, connection: { requestRejection: () => undefined }, config: { forwardTimeoutMs: timeoutMs } });
+  const drive = async (ctx, options = {}) => {
+    const res = fakeResponse();
+    await ctx.routes.exact.get('/')(
+      fakeRequest(undefined, { method: 'GET', url: '/', headers: { host: '127.0.0.1:3080' }, remoteAddress: '127.0.0.1', ...options }),
+      res,
+    );
+    return res;
+  };
+
+  try {
+    // (a) A body-length header is never forwarded on a request with no body, so a
+    //     lying `Content-Length` cannot hang anything: the answer just arrives.
+    const lying = await drive(ctxFor(answering.address().port), { headers: { host: '127.0.0.1:3080', 'content-length': '50' } });
+    assert.equal(await waitFor(() => lying.body !== undefined), true, 'the answer arrives instead of hanging');
+    assert.equal(lying.statusCode, 200);
+    assert.equal(seen.at(-1).length, undefined, 'and the upstream was told no body was coming');
+
+    // (b) A silent upstream gets a deadline, and the client is told 504.
+    const started = Date.now();
+    const quiet = await drive(ctxFor(silent.address().port, 150));
+    assert.equal(await waitFor(() => quiet.body !== undefined, 100), true, 'the deadline answers');
+    assert.equal(quiet.statusCode, 504, 'with 504, not a hang');
+    assert.ok(Date.now() - started < 5000, 'well inside the configured deadline');
+    assert.match(String(quiet.body), /did not answer in time/);
+
+    // (c) A client that goes away takes the upstream with it, rather than pinning
+    //     the socket until the deadline.
+    const gone = fakeResponse();
+    const pending = ctxFor(stalled.address().port, 5000).routes.exact.get('/')(
+      fakeRequest(undefined, { method: 'GET', url: '/', headers: { host: '127.0.0.1:3080' }, remoteAddress: '127.0.0.1' }),
+      gone,
+    );
+    // Wait until the upstream really has the request, so the destroy below is
+    // what drops the socket rather than a race with the connect.
+    await arrived;
+    assert.ok(gone.listenerCount('close') > 0, 'the forwarder watches for the client leaving');
+    gone.emit('close');
+    await pending;
+    assert.equal(await waitFor(() => aborted > 0, 100), true, 'the upstream socket was dropped with the client');
+    assert.equal(gone.body, undefined, 'and nothing was written to a client that had left');
+
+    // (d) A HEAD request still ends cleanly, with the upstream drained.
+    const head = await drive(ctxFor(answering.address().port), { method: 'HEAD' });
+    assert.equal(await waitFor(() => head.writableEnded === true, 100), true, 'HEAD ends');
+    assert.equal(head.statusCode, 200);
+    assert.equal(head.body, undefined, 'with no body');
+  } finally {
+    await stop(answering);
+    await stop(silent);
+    await stop(stalled);
+  }
+});
+
 test('serves the pairing page only for a code that could be real', async () => {
   // With no password armed, `?code=` used to be enough to make the recovery page
   // appear — and that page states whether a password is set.
@@ -1361,6 +1652,30 @@ test('lands a pairing code in the app without any page script', async () => {
   assert.equal(preview.status, 200, 'a prefetch gets the page, not the landing');
   assert.equal(preview.res.headers['set-cookie'], undefined, 'and no credential');
   assert.equal((await route(ctx, `${CHANNEL}/unlock?code=${previewed}`, {}, { method: 'GET', headers: { accept: 'text/html' } })).status, 303, 'the code is still good for the person');
+
+  // (7) A rejected code on the GET door is a refusal in the shape that was asked
+  //     for — both for a burned code and for one that never existed. Each attempt
+  //     comes from its own address so the refusal budget is not the thing under
+  //     test here.
+  const burned = await mint();
+  await route(ctx, `${CHANNEL}/unlock?code=${burned}`, {}, { method: 'GET', headers: { accept: 'text/html' } });
+  let client = 0;
+  const from = () => `198.51.100.${(client += 1)}`;
+  for (const [label, code] of [['burned', burned], ['unknown', 'ABCDEFGH']]) {
+    const asJson = await route(ctx, `${CHANNEL}/unlock?code=${code}`, {}, { method: 'GET', headers: { accept: 'application/json' }, remoteAddress: from() });
+    assert.equal(asJson.ok, false, `${label}: the JSON shape is refused`);
+    assert.equal(asJson.error.code, 'remote-access/pair-denied', `${label}: with the same code the POST door uses`);
+    assert.equal(asJson.res.headers.location, undefined, `${label}: and no redirect`);
+    assert.ok(!String(asJson.res.body).includes('<!doctype'), `${label}: and never the page`);
+
+    const forced = await route(ctx, `${CHANNEL}/unlock?code=${code}&format=json`, {}, { method: 'GET', headers: { accept: 'text/html' }, remoteAddress: from() });
+    assert.equal(forced.ok, false, `${label}: ?format=json is refused the same way`);
+
+    const asPage = await route(ctx, `${CHANNEL}/unlock?code=${code}`, {}, { method: 'GET', headers: { accept: 'text/html' }, remoteAddress: from() });
+    assert.equal(asPage.status, 200, `${label}: the HTML shape gets the page`);
+    assert.match(String(asPage.res.body), /<!doctype html>/, `${label}: which is the recovery page`);
+    assert.equal(asPage.res.headers['set-cookie'], undefined, `${label}: with no credential`);
+  }
 });
 
 test('offers a plain anchor into the app, and asks for JSON itself', () => {
