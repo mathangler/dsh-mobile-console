@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ACCESS_KEY_PREFIX,
@@ -428,7 +428,7 @@ test('gives every record a fresh id that is not part of a fingerprint', () => {
 // The listener port is deliberately a *closed* one: a test that reaches the
 // index-forward path must fail closed rather than dial whatever is running on
 // the developer's machine. Tests that care about the reported port set it.
-function hostCtx({ records = new Map(), secrets = new Map(), config, editor, connection, port = 9, documentPath } = {}) {
+function hostCtx({ records = new Map(), secrets = new Map(), config, editor, connection, port = 9, documentPath, bindHost = '127.0.0.1' } = {}) {
   const routes = { prefix: [], exact: new Map() };
   // The real store refuses a payload it cannot spell, with its own error, *at
   // write time* — so a double that accepts anything hides exactly the bug class
@@ -535,7 +535,7 @@ function hostCtx({ records = new Map(), secrets = new Map(), config, editor, con
                 })
               : undefined,
     webServer: {
-      host: '127.0.0.1',
+      host: bindHost,
       port,
       register: (route) => {
         if (route.kind === 'prefix') routes.prefix.push(route.handler);
@@ -561,14 +561,14 @@ function webServerRows(host = '127.0.0.1') {
 }
 
 /** The request shape the webserver hands a handler: two arguments, no more. */
-function fakeRequest(body, { url = '/', remoteAddress = '203.0.113.9', headers = {}, method = 'POST' } = {}) {
+function fakeRequest(body, { url = '/', remoteAddress = '203.0.113.9', localAddress, headers = {}, method = 'POST' } = {}) {
   const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))];
   let index = 0;
   return {
     method,
     url,
     headers: { host: 'dsh.example.com', 'content-type': 'application/json', ...headers },
-    socket: { remoteAddress },
+    socket: { remoteAddress, ...(localAddress === undefined ? {} : { localAddress }) },
     // Only `forwardIndex` pipes a request; ending the upstream is what makes the
     // forward observable, and a forward to a closed port simply fails closed.
     pipe(target) {
@@ -648,17 +648,50 @@ function fakeResponse() {
 }
 
 /** POST one JSON endpoint and return `{ status, value, error }`. */
+// The panel is used from the desktop, so these calls model a *local* caller by
+// default: a loopback authority on a loopback socket. A test that passes its own
+// `remoteAddress` or `host` is modelling a public caller instead, and under the
+// plugin-is-the-gate rule such a caller must present a live credential.
+function localRequest(body, options = {}, url) {
+  const local = options.remoteAddress === undefined && options.headers?.host === undefined;
+  return fakeRequest(body, {
+    ...options,
+    url,
+    ...(local ? { remoteAddress: '127.0.0.1', localAddress: '127.0.0.1', headers: { host: '127.0.0.1:3080', ...(options.headers ?? {}) } } : {}),
+  });
+}
+
 async function endpoint(ctx, name, body, options) {
   const res = fakeResponse();
-  await ctx.routes.prefix[0](fakeRequest(body, { ...options, url: `${CHANNEL}/${name}` }), res);
+  await ctx.routes.prefix[0](localRequest(body, options, `${CHANNEL}/${name}`), res);
   const payload = res.body === undefined ? undefined : JSON.parse(res.body);
   return { status: res.statusCode, ok: payload?.ok, value: payload?.value, error: payload?.error, res };
 }
 
+/**
+ * Mint a live durable device credential without driving a door.
+ *
+ * A public caller now has to *hold* one of these, so the tests that model a
+ * public browser need a way to give it a real row and cookie.
+ */
+async function issueDevice(ctx, { days = 30 } = {}) {
+  const code = (await endpoint(ctx, 'pair-code', { days })).value;
+  const answer = await route(ctx, `${CHANNEL}/unlock/pair`, { code: code.code }, { method: 'POST' });
+  const cookie = []
+    .concat(answer.res.headers['set-cookie'] ?? [])
+    .map(String)
+    .find((value) => value.startsWith('mc-device='));
+  assert.ok(cookie !== undefined, 'the pairing door issued a device credential');
+  const devices = (await endpoint(ctx, 'device-list', {})).value.devices;
+  return {
+    token: cookie.split(';')[0].split('=').slice(1).join('='),
+    row: devices.find((row) => row.temporary !== true),
+  };
+}
 /** Call one route by its full path, for the self-authenticating ones. */
 async function route(ctx, path, body, options) {
   const res = fakeResponse();
-  await ctx.routes.prefix[0](fakeRequest(body, { ...options, url: path }), res);
+  await ctx.routes.prefix[0](localRequest(body, options, path), res);
   let payload;
   try {
     payload = res.body === undefined ? undefined : JSON.parse(res.body);
@@ -982,18 +1015,30 @@ test('exchanges a launch token for the platform cookie, keeping ours', async () 
   assert.ok(!String(refused.headers['content-type'] ?? '').includes('text/html'), 'and never our page');
   assert.equal(ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices.length, 1, 'still only the one real row');
 
-  // The platform's verdict comes first: an accepted caller is forwarded, never
-  // bounced through a fresh launch token — the loop that would otherwise never
-  // end, since the token visit redirects back to `/`.
+  // The platform's verdict comes next, but it is no longer the whole decision: a
+  // *public* caller the platform accepts still has to hold a live plugin
+  // credential, and `mc-device=whatever` is not one.
   const forwarded = hostCtx({ connection: { requestRejection: () => undefined }, port: 9 });
   const answer = fakeResponse();
   await forwarded.routes.exact.get('/')(
-    fakeRequest(undefined, { method: 'GET', url: '/', headers: { cookie: 'mc-device=whatever' } }),
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: { cookie: 'mc-device=whatever', accept: 'application/json' } }),
     answer,
   );
-  assert.notEqual(answer.statusCode, 303, 'an accepted caller is never redirected through a launch token');
-  assert.equal(await waitFor(() => answer.body !== undefined), true, 'the index forward ran');
-  assert.equal(answer.statusCode, 502, 'and failed closed, because nothing listens on that port');
+  assert.equal(answer.statusCode, 403, 'a platform cookie alone is not authorization');
+  assert.equal(JSON.parse(String(answer.body)).error.code, 'remote-access/not-authorized');
+
+  // The same caller *with* a live device row is forwarded, never bounced through a
+  // fresh launch token — the loop that would otherwise never end, since the token
+  // visit redirects back to `/`.
+  const live = await issueDevice(forwarded);
+  const forwardedAnswer = fakeResponse();
+  await forwarded.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: { cookie: `mc-device=${live.token}` } }),
+    forwardedAnswer,
+  );
+  assert.notEqual(forwardedAnswer.statusCode, 303, 'an accepted caller is never redirected through a launch token');
+  assert.equal(await waitFor(() => forwardedAnswer.body !== undefined), true, 'the index forward ran');
+  assert.equal(forwardedAnswer.statusCode, 502, 'and failed closed, because nothing listens on that port');
 });
 
 test('bootstraps a loopback launch-token visit through the platform authorizer', async () => {
@@ -1277,7 +1322,7 @@ test('refuses a cross-site POST at every public door', async () => {
   assert.equal(ctx.records.get('dsh-remote-access/pair-codes').payload.codes.length, 1, 'and no code was burned');
 
   // Same-origin, and the desktop workflow with no Origin at all, still work.
-  const sameOrigin = await route(ctx, `${CHANNEL}/unlock/pair`, { code }, { method: 'POST', headers: { origin: 'http://dsh.example.com', 'sec-fetch-site': 'same-origin' } });
+  const sameOrigin = await route(ctx, `${CHANNEL}/unlock/pair`, { code }, { method: 'POST', headers: { origin: 'http://127.0.0.1:3080', 'sec-fetch-site': 'same-origin' } });
   assert.equal(sameOrigin.ok, true, JSON.stringify(sameOrigin.error));
   assert.equal((await endpoint(ctx, 'device-list', {})).value.devices.length, 1, 'the same-origin pairing went through');
 
@@ -1548,6 +1593,296 @@ test('prunes old used pairing codes without resurrecting anything', async () => 
   const fresh = await endpoint(ctx, 'pair-code', { days: 30 });
   assert.equal((await endpoint(ctx, 'pair-code-status', { id: fresh.value.id })).value.state, 'ready', 'a new code still reads ready');
 });
+test('the plugin is the gate: a platform cookie alone is not authorization', async () => {
+  // A public browser the platform already accepts, holding no plugin credential.
+  // The platform challenges public callers; the desktop is accepted, as it is in reality.
+  const platform = {
+    requestRejection: (request) =>
+      String(request?.headers?.cookie ?? '').includes('dsh-session=ok') || String(request?.headers?.host ?? '').startsWith('127.0.0.1')
+        ? undefined
+        : 401,
+  };
+  const ctx = hostCtx({ connection: platform, port: 9 });
+  const root = ctx.routes.exact.get('/');
+  const publicCaller = (extra = {}) =>
+    fakeRequest(undefined, {
+      method: 'GET',
+      url: '/',
+      headers: { host: 'dsh.example.com', cookie: 'dsh-session=ok', ...extra.headers },
+      remoteAddress: extra.remoteAddress ?? '203.0.113.9',
+      ...(extra.localAddress === undefined ? {} : { localAddress: extra.localAddress }),
+    });
+
+  // The decisive case: refused, and never forwarded.
+  const refused = fakeResponse();
+  await root(publicCaller({ headers: { accept: 'application/json' } }), refused);
+  assert.equal(refused.statusCode, 403, 'a platform cookie alone does not get in');
+  assert.equal(JSON.parse(String(refused.body)).error.code, 'remote-access/not-authorized');
+  assert.equal(refused.body.includes('__DSH_BOOT__'), false, 'and the index was never forwarded');
+  // A navigation is told why, in words, on the page it can act on.
+  const navigation = fakeResponse();
+  await root(publicCaller({ headers: { accept: 'text/html' } }), navigation);
+  assert.equal(navigation.statusCode, 200, 'a navigation gets the page');
+  assert.match(String(navigation.body), /no longer authorized/, 'with the reason in it');
+  assert.match(String(navigation.body), /pair again with a code/, 'and the way back');
+
+  // The same caller with a live device row is forwarded, exactly as before.
+  const live = await issueDevice(ctx);
+  const allowed = fakeResponse();
+  await root(publicCaller({ headers: { cookie: `dsh-session=ok; mc-device=${live.token}` } }), allowed);
+  assert.equal(await waitFor(() => allowed.body !== undefined), true, 'the index forward ran');
+  assert.equal(allowed.statusCode, 502, 'and failed closed, because nothing listens on that port');
+
+  // Revoked: the row is gone, so the platform cookie is all it has left.
+  await endpoint(ctx, 'device-revoke', { id: live.row.id });
+  const revoked = fakeResponse();
+  await root(publicCaller({ headers: { accept: 'application/json', cookie: `dsh-session=ok; mc-device=${live.token}` } }), revoked);
+  assert.equal(revoked.statusCode, 403, 'a revoked device is refused even though the platform accepts it');
+  assert.equal(JSON.parse(String(revoked.body)).error.code, 'remote-access/not-authorized');
+
+  // Expired: the row is there, but its life is over.
+  const stale = await issueDevice(ctx);
+  const rows = ctx.records.get(DEVICES_V2_RECORD_KEY).payload.devices;
+  rows.find((row) => row.id === stale.row.id).expiresAt = Date.now() - 1000;
+  const expired = fakeResponse();
+  await root(publicCaller({ headers: { accept: 'application/json', cookie: `dsh-session=ok; mc-device=${stale.token}` } }), expired);
+  assert.equal(expired.statusCode, 403, 'an expired device is refused too');
+});
+
+test('the desktop stays local, and a phone on the LAN does not', async () => {
+  const platform = { requestRejection: () => undefined };
+  // This machine's own LAN address, when it has one: a closed port *on our own
+  // interface* refuses instantly, where a stranger's address would hang.
+  const own = Object.values(networkInterfaces())
+    .flat()
+    .find((entry) => entry !== undefined && entry.family === 'IPv4' && !entry.internal)?.address;
+  const LAN = own ?? '192.168.31.186';
+
+  // (a) Loopback authority from a loopback socket: the desktop, unchanged.
+  const loopback = hostCtx({ connection: platform, port: 9 });
+  const desktop = fakeResponse();
+  await loopback.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: { host: '127.0.0.1:9' }, remoteAddress: '127.0.0.1' }),
+    desktop,
+  );
+  assert.equal(await waitFor(() => desktop.body !== undefined), true, 'the desktop is forwarded');
+  assert.equal(desktop.statusCode, 502, 'with no credential at all');
+
+  // (b) A self-dial to the bind literal: LAN mode, still the desktop.
+  const lan = hostCtx({ connection: platform, port: 9, bindHost: LAN });
+  const selfDial = fakeResponse();
+  await lan.routes.exact.get('/')(
+    fakeRequest(undefined, {
+      method: 'GET',
+      url: '/',
+      headers: { host: `${LAN}:9` },
+      remoteAddress: LAN,
+      localAddress: LAN,
+    }),
+    selfDial,
+  );
+  assert.equal(await waitFor(() => selfDial.body !== undefined), true, 'the desktop reaches its own LAN bind');
+  assert.equal(selfDial.statusCode, 502, 'with no credential at all');
+
+  // (b2) The fallback shape: the bind literal, with a peer that is one of this
+  // machine's own addresses but not the same one the socket dialled from.
+  const ownAddress = fakeResponse();
+  await lan.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: { host: `${LAN}:9` }, remoteAddress: '127.0.0.1' }),
+    ownAddress,
+  );
+  assert.equal(await waitFor(() => ownAddress.body !== undefined), true, 'an own address as the peer is still local');
+
+  // (c) A phone on the same LAN: another host, no credential, refused.
+  const phone = fakeResponse();
+  await lan.routes.exact.get('/')(
+    fakeRequest(undefined, {
+      method: 'GET',
+      url: '/',
+      headers: { host: `${LAN}:9`, accept: 'application/json' },
+      remoteAddress: '192.168.31.50',
+    }),
+    phone,
+  );
+  assert.equal(phone.statusCode, 403, 'a LAN phone needs a plugin credential');
+  assert.equal(JSON.parse(String(phone.body)).error.code, 'remote-access/not-authorized');
+  assert.equal(phone.body.includes('__DSH_BOOT__'), false, 'and is never forwarded');
+
+  // And with one, it is served.
+  const phoneCtx = hostCtx({ connection: platform, port: 9, bindHost: LAN });
+  const live = await issueDevice(phoneCtx);
+  const served = fakeResponse();
+  await phoneCtx.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: { host: `${LAN}:9`, cookie: `mc-device=${live.token}` }, remoteAddress: '192.168.31.50' }),
+    served,
+  );
+  assert.equal(await waitFor(() => served.body !== undefined), true, 'a paired phone is forwarded');
+});
+
+test('the bootstrap doors answer a public caller with no credential', async () => {
+  const platform = { requestRejection: () => 401 };
+  const ctx = hostCtx({ connection: platform, port: 9 });
+  const publicHeaders = { host: 'dsh.example.com' };
+  const publicRequest = (options) => fakeRequest(options.body, { ...options, remoteAddress: '203.0.113.9', headers: { ...publicHeaders, ...(options.headers ?? {}) } });
+
+  // The pairing page: it is how a code gets in, so it must answer before any
+  // credential exists.
+  const page = fakeResponse();
+  await ctx.routes.prefix[0](publicRequest({ method: 'GET', url: `${CHANNEL}/unlock?code=ABCDEFGH`, headers: { accept: 'text/html' } }), page);
+  assert.equal(page.statusCode, 200, 'the pairing page answers');
+  assert.match(String(page.body), /<!doctype html>/);
+
+  // The password door, and the pairing POST, likewise.
+  const challenge = fakeResponse();
+  await ctx.routes.prefix[0](publicRequest({ method: 'GET', url: `${CHANNEL}/unlock/challenge`, headers: { accept: 'application/json' } }), challenge);
+  assert.notEqual(challenge.statusCode, 403, 'the password challenge answers');
+  const pair = fakeResponse();
+  await ctx.routes.prefix[0](publicRequest({ method: 'POST', url: `${CHANNEL}/unlock/pair`, body: { code: 'ABCDEFGH' }, headers: { accept: 'application/json' } }), pair);
+  assert.equal(pair.statusCode, 200, 'the pairing door answers');
+  assert.equal(JSON.parse(String(pair.body)).error.code, 'remote-access/pair-denied', 'and refuses the bad code, not the caller');
+
+  // The beacon and the heartbeat script stay public: the page and the phone's
+  // own ping are not panel actions.
+  const beacon = fakeResponse();
+  await ctx.routes.prefix[0](publicRequest({ method: 'POST', url: `${CHANNEL}/page-close`, body: { token: newTempToken() } }), beacon);
+  assert.notEqual(beacon.statusCode, 403, 'the close beacon is not gated');
+  const heartbeat = fakeResponse();
+  const heartbeatRoute = ctx.routes.exact.get('/remote-access/heartbeat.js');
+  assert.equal(typeof heartbeatRoute, 'function', 'the heartbeat script is registered');
+  await heartbeatRoute(publicRequest({ method: 'GET', url: '/remote-access/heartbeat.js' }), heartbeat);
+  assert.notEqual(heartbeat.statusCode, 403, 'and it is not gated either');
+
+  // The launch-token visit still mints and lands, with no credential to present.
+  const visit = fakeResponse();
+  await ctx.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/?token=launch-token', headers: { host: 'dsh.example.com' }, remoteAddress: '203.0.113.9' }),
+    visit,
+  );
+  assert.notEqual(visit.statusCode, 403, 'the launch-token visit is not refused by the new rule');
+});
+
+test('the fenced panel API needs a live credential from a public caller', async () => {
+  const platform = {
+    requestRejection: (request) =>
+      String(request?.headers?.cookie ?? '').includes('dsh-session=ok') || String(request?.headers?.host ?? '').startsWith('127.0.0.1')
+        ? undefined
+        : 401,
+  };
+  const ctx = hostCtx({ connection: platform, port: 9 });
+
+  // Public authority, platform cookie, no plugin credential: refused.
+  const refused = fakeResponse();
+  await ctx.routes.prefix[0](
+    fakeRequest({}, { method: 'POST', url: `${CHANNEL}/state`, headers: { host: 'dsh.example.com', cookie: 'dsh-session=ok' }, remoteAddress: '203.0.113.9' }),
+    refused,
+  );
+  assert.equal(refused.statusCode, 403, 'the panel API is gated too');
+  assert.equal(JSON.parse(String(refused.body)).error.code, 'remote-access/not-authorized');
+
+  // With a live device credential: served.
+  const live = await issueDevice(ctx);
+  const served = fakeResponse();
+  await ctx.routes.prefix[0](
+    fakeRequest({}, { method: 'POST', url: `${CHANNEL}/state`, headers: { host: 'dsh.example.com', cookie: `dsh-session=ok; mc-device=${live.token}` }, remoteAddress: '203.0.113.9' }),
+    served,
+  );
+  assert.equal(served.statusCode, 200, 'a paired device can still read the panel');
+  assert.equal(JSON.parse(String(served.body)).ok, true);
+
+  // The desktop is local, so it needs nothing.
+  const desktop = fakeResponse();
+  await ctx.routes.prefix[0](
+    fakeRequest({}, { url: `${CHANNEL}/state`, headers: { host: '127.0.0.1:9' }, remoteAddress: '127.0.0.1' }),
+    desktop,
+  );
+  assert.equal(desktop.statusCode, 200, 'the desktop is unchanged');
+});
+
+test('the two channel switches compose with the new gate rule', async () => {
+  const platform = { requestRejection: () => undefined };
+  const ctx = hostCtx({ connection: platform, port: 9 });
+  const live = await issueDevice(ctx);
+  const caller = (extra = {}) =>
+    fakeRequest(undefined, {
+      method: 'GET',
+      url: '/',
+      headers: { host: 'dsh.example.com', accept: 'application/json', cookie: `mc-device=${live.token}`, ...extra.headers },
+      remoteAddress: '203.0.113.9',
+    });
+
+  // A device credential that is switched off does not authorize, even though the
+  // platform accepts the caller: the channel decides, not the cookie.
+  await endpoint(ctx, 'set-access-policy', { device: false });
+  const off = fakeResponse();
+  await ctx.routes.exact.get('/')(caller(), off);
+  assert.equal(off.statusCode, 403, 'a switched-off device channel refuses');
+  assert.equal(JSON.parse(String(off.body)).error.code, 'remote-access/device-disabled');
+
+  // A temporary credential (the ticket) with its channel off: the same.
+  await endpoint(ctx, 'set-access-policy', { device: true, temporary: false });
+  const secret = 'gate-ticket-secret';
+  ctx.records.set('dsh-remote-access/recovery', {
+    kind: 'grant',
+    payload: { version: 1, key: 'k', salt: 's', secret, iterations: 1000 },
+  });
+  const ticket = fakeResponse();
+  await ctx.routes.exact.get('/')(
+    fakeRequest(undefined, {
+      method: 'GET',
+      url: '/',
+      headers: { host: 'dsh.example.com', accept: 'application/json', cookie: `mc-unlock=${signTicket(secret, { v: 1, exp: Date.now() + 60_000, row: live.row.id })}` },
+      remoteAddress: '203.0.113.9',
+    }),
+    ticket,
+  );
+  assert.equal(ticket.statusCode, 403, 'a switched-off temporary channel refuses the ticket');
+  assert.equal(JSON.parse(String(ticket.body)).error.code, 'remote-access/temporary-disabled');
+
+  // Both off: only local callers and the bootstrap doors remain.
+  await endpoint(ctx, 'set-access-policy', { device: false, temporary: false });
+  const bothOff = fakeResponse();
+  await ctx.routes.exact.get('/')(caller(), bothOff);
+  assert.equal(bothOff.statusCode, 403, 'both channels off refuses the device');
+  const localStill = fakeResponse();
+  await ctx.routes.exact.get('/')(
+    fakeRequest(undefined, { method: 'GET', url: '/', headers: { host: '127.0.0.1:9' }, remoteAddress: '127.0.0.1' }),
+    localStill,
+  );
+  assert.equal(await waitFor(() => localStill.body !== undefined), true, 'and the desktop is still forwarded');
+});
+test('a local tunnel is not a local caller', async () => {
+  // cloudflared runs on this machine and connects from 127.0.0.1 to 127.0.0.1, so
+  // the socket looks like a self-dial — but the authority is the tunnel hostname
+  // and the request carries the client's address. Treating that as local would
+  // hand every tunnelled visitor a free pass through this gate.
+  const platform = { requestRejection: () => undefined };
+  const ctx = hostCtx({ connection: platform, port: 9 });
+  const tunnel = (extra = {}) =>
+    fakeRequest(undefined, {
+      method: 'GET',
+      url: '/',
+      headers: { host: 'dsh-win.mathangler.site', accept: 'application/json', ...extra.headers },
+      remoteAddress: '127.0.0.1',
+      localAddress: '127.0.0.1',
+    });
+
+  const forwarded = fakeResponse();
+  await ctx.routes.exact.get('/')(tunnel({ headers: { 'cf-connecting-ip': '203.0.113.7' } }), forwarded);
+  assert.equal(forwarded.statusCode, 403, 'a tunnelled visitor needs a plugin credential');
+  assert.equal(JSON.parse(String(forwarded.body)).error.code, 'remote-access/not-authorized');
+
+  // Even without a client header: a loopback self-dial to a public authority is a
+  // forged Host or a tunnel, never the desktop, which uses the loopback authority.
+  const bare = fakeResponse();
+  await ctx.routes.exact.get('/')(tunnel(), bare);
+  assert.equal(bare.statusCode, 403, 'a loopback self-dial to a public authority is not local');
+
+  // With a live credential the tunnelled visitor is served as before.
+  const live = await issueDevice(ctx);
+  const served = fakeResponse();
+  await ctx.routes.exact.get('/')(tunnel({ headers: { 'cf-connecting-ip': '203.0.113.7', cookie: `mc-device=${live.token}` } }), served);
+  assert.equal(await waitFor(() => served.body !== undefined), true, 'a paired tunnelled device is forwarded');
+});
 test('revoke-temporary clears exactly the temporary rows', async () => {
   const ctx = hostCtx();
 
@@ -1800,7 +2135,7 @@ test('lands a pairing code in the app without any page script', async () => {
   // (1) A browser navigation: the GET itself redeems and redirects into the app,
   //     with the device cookie on that same 303. No script runs anywhere.
   const code = await mint();
-  const navigation = await route(ctx, `${CHANNEL}/unlock?code=${code}`, {}, { method: 'GET', headers: { accept: 'text/html,application/xhtml+xml' } });
+  const navigation = await route(ctx, `${CHANNEL}/unlock?code=${code}`, {}, { method: 'GET', headers: { host: 'dsh.example.com', accept: 'text/html,application/xhtml+xml' } });
   assert.equal(navigation.status, 303, 'the navigation is redirected, not shown a page');
   assert.equal(navigation.res.headers.location, 'http://dsh.example.com/', 'straight to the entry URL');
   const cookies = [].concat(navigation.res.headers['set-cookie'] ?? []).map(String);
@@ -1828,7 +2163,7 @@ test('lands a pairing code in the app without any page script', async () => {
 
   // (3) A form-shaped POST from a browser is landed the same way as the GET.
   const formCode = await mint();
-  const asHtml = await route(ctx, `${CHANNEL}/unlock/pair`, { code: formCode }, { method: 'POST', headers: { accept: 'text/html' } });
+  const asHtml = await route(ctx, `${CHANNEL}/unlock/pair`, { code: formCode }, { method: 'POST', headers: { host: 'dsh.example.com', accept: 'text/html' } });
   assert.equal(asHtml.status, 303, 'an HTML POST is redirected');
   assert.equal(asHtml.res.headers.location, 'http://dsh.example.com/');
   assert.ok([].concat(asHtml.res.headers['set-cookie'] ?? []).map(String).some((value) => value.startsWith('mc-device=')));
@@ -1946,7 +2281,7 @@ test('decides Secure from configuration, not from a header a caller sets', async
   // which let any caller choose the transport attributes of a credential.
   const plain = hostCtx();
   const plainCode = (await endpoint(plain, 'pair-code', { days: 30 })).value.code;
-  const claimed = await route(plain, `${CHANNEL}/unlock/pair`, { code: plainCode }, { method: 'POST', headers: { 'x-forwarded-proto': 'https' } });
+  const claimed = await route(plain, `${CHANNEL}/unlock/pair`, { code: plainCode }, { method: 'POST', headers: { host: 'dsh.example.com', 'x-forwarded-proto': 'https' } });
   assert.equal(claimed.ok, true, JSON.stringify(claimed.error));
   const cookie = [].concat(claimed.res.headers['set-cookie'] ?? []).join('; ');
   assert.ok(!cookie.includes('Secure'), 'a header claim does not add Secure');
@@ -1954,7 +2289,7 @@ test('decides Secure from configuration, not from a header a caller sets', async
   // A configured public URL is what says https, and it is read from the config.
   const advertised = hostCtx({ config: { publicUrl: 'https://dsh.example.com/' } });
   const advertisedCode = (await endpoint(advertised, 'pair-code', { days: 30 })).value.code;
-  const secure = await route(advertised, `${CHANNEL}/unlock/pair`, { code: advertisedCode }, { method: 'POST' });
+  const secure = await route(advertised, `${CHANNEL}/unlock/pair`, { code: advertisedCode }, { method: 'POST', headers: { host: 'dsh.example.com' } });
   assert.equal(secure.ok, true, JSON.stringify(secure.error));
   assert.ok([].concat(secure.res.headers['set-cookie'] ?? []).join('; ').includes('Secure'), 'the configured https base does');
 });
@@ -2111,7 +2446,9 @@ test('gives the panel a bigger budget than the public doors, and says how long',
 
   // Counted per client, not per row: another client has its own budget, and a
   // different row does not inherit the first row's spending.
-  const other = await endpoint(ctx, 'device-link', { id: device.id }, { remoteAddress: '198.51.100.30' });
+  // A different client, still local: the loopback socket may forward the client
+  // address, which is what the per-client budget is keyed on.
+  const other = await endpoint(ctx, 'device-link', { id: device.id }, { headers: { 'x-forwarded-for': '198.51.100.30' } });
   assert.equal(other.ok, true, 'a second client still has its own budget');
 
   // The public door keeps the strict five: that is where guessing is stopped.
